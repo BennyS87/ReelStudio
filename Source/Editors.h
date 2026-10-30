@@ -72,11 +72,12 @@ private:
 
 //==============================================================================
 /** Bottom-panel "Editor" tab: shows the right editor for the selected clip. */
-class EditorPanel : public juce::Component, private juce::ChangeListener
+class EditorPanel : public juce::Component, private juce::ChangeListener, public EditWatcher
 {
 public:
     explicit EditorPanel (Session&);
     ~EditorPanel() override;
+    void editAboutToBeDeleted() override { controls.clear(); roll.reset(); steps.reset(); shownVersion = -1; shownClip = {}; }
     void resized() override;
     void paint (juce::Graphics&) override;
     bool deleteSelectedNotes() { return roll != nullptr && roll->deleteSelected(); }

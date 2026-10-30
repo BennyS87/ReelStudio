@@ -371,11 +371,12 @@ namespace
 EditorPanel::EditorPanel (Session& s) : session (s)
 {
     session.addChangeListener (this);
+    session.editWatchers.add (this);
     styleHint (hint); addAndMakeVisible (hint);
     rebuild();
 }
 
-EditorPanel::~EditorPanel() { session.removeChangeListener (this); }
+EditorPanel::~EditorPanel() { session.editWatchers.remove (this); session.removeChangeListener (this); }
 
 void EditorPanel::paint (juce::Graphics& g) { g.fillAll (Col::panel); }
 

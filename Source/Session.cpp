@@ -133,6 +133,7 @@ void Session::detachEdit()
 {
     if (edit != nullptr)
     {
+        editWatchers.call ([] (EditWatcher& w) { w.editAboutToBeDeleted(); });   // UI lets go of plugins first
         edit->getTransport().stop (false, true);
         edit->state.removeListener (this);
         edit.reset();

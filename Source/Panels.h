@@ -5,11 +5,12 @@
 namespace Reel
 {
 /** Base for bottom panels that rebuild when the selected track or the edit's structure changes. */
-class RebuildingPanel : public juce::Component, protected juce::ChangeListener
+class RebuildingPanel : public juce::Component, protected juce::ChangeListener, public EditWatcher
 {
 public:
-    explicit RebuildingPanel (Session& s) : session (s) { session.addChangeListener (this); }
-    ~RebuildingPanel() override { session.removeChangeListener (this); }
+    explicit RebuildingPanel (Session& s) : session (s) { session.addChangeListener (this); session.editWatchers.add (this); }
+    ~RebuildingPanel() override { session.editWatchers.remove (this); session.removeChangeListener (this); }
+    void editAboutToBeDeleted() override { items.clear(); breaks.clear(); shownVersion = -1; shownTrack = {}; }
     void paint (juce::Graphics& g) override { g.fillAll (Col::panel); }
     void resized() override { layout(); }
     void rebuildNow() { shownTrack = session.selectedTrack; shownVersion = session.structureVersion; items.clear(); breaks.clear(); build(); for (auto* c : items) addAndMakeVisible (c); layout(); repaint(); if (onContentChanged) onContentChanged(); }

@@ -5,11 +5,12 @@ namespace Reel
 ArrangeView::ArrangeView (Session& s) : session (s)
 {
     session.addChangeListener (this);
+    session.editWatchers.add (this);
     setWantsKeyboardFocus (false);
     startTimerHz (30);
 }
 
-ArrangeView::~ArrangeView() { session.removeChangeListener (this); }
+ArrangeView::~ArrangeView() { session.editWatchers.remove (this); session.removeChangeListener (this); }
 
 std::vector<ArrangeView::Row> ArrangeView::rows() const
 {

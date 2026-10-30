@@ -366,7 +366,7 @@ namespace
             }
             if (t != nullptr)
             {
-                if (auto* lm = t->getLevelMeterPlugin()) { meter = std::make_unique<LevelMeter> (lm->measurer); addAndMakeVisible (*meter); }
+                if (auto* lm = t->getLevelMeterPlugin()) { meter = std::make_unique<LevelMeter> (*lm); addAndMakeVisible (*meter); }
                 for (auto* b : { &mute, &solo }) { b->setClickingTogglesState (true); addAndMakeVisible (*b); }
                 mute.setToggleState (t->isMuted (false), juce::dontSendNotification); solo.setToggleState (t->isSolo (false), juce::dontSendNotification);
                 mute.onClick = [this] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) { session.beginAction(); t->setMute (mute.getToggleState()); } };

@@ -139,8 +139,8 @@ private:
 class LevelMeter : public juce::Component, private juce::Timer
 {
 public:
-    explicit LevelMeter (te::LevelMeasurer& m) : measurer (m) { measurer.addClient (client); startTimerHz (30); }
-    ~LevelMeter() override { measurer.removeClient (client); }
+    explicit LevelMeter (te::LevelMeterPlugin& p) : plugin (&p) { plugin->measurer.addClient (client); startTimerHz (30); }
+    ~LevelMeter() override { plugin->measurer.removeClient (client); }
     void paint (juce::Graphics& g) override
     {
         auto r = getLocalBounds().toFloat();
@@ -159,7 +159,8 @@ private:
         level = juce::jmax (target, level - 0.03f);
         repaint();
     }
-    te::LevelMeasurer& measurer; te::LevelMeasurer::Client client; float level = 0;
+    juce::ReferenceCountedObjectPtr<te::LevelMeterPlugin> plugin;   // keeps the meter alive even if its track is deleted
+    te::LevelMeasurer::Client client; float level = 0;
 };
 
 inline void styleHeading (juce::Label& l, float size = 17.0f)

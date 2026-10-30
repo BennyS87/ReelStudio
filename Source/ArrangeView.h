@@ -5,6 +5,7 @@ namespace Reel
 {
 class ArrangeView : public juce::Component,
                     public juce::FileDragAndDropTarget,
+                    public EditWatcher,
                     private juce::ChangeListener,
                     private juce::Timer
 {
@@ -24,6 +25,7 @@ public:
     void filesDropped (const juce::StringArray&, int x, int y) override;
 
     void zoom (double factor, int anchorX = -1);
+    void editAboutToBeDeleted() override { thumbs.clear(); drag = Drag::none; dragParam = nullptr; dragPoint = -1; }
     double snapBeats = 1.0;                       // 0 = off
     std::function<void (const juce::StringArray&, te::AudioTrack*, te::TimePosition)> onFilesDropped;
     std::function<void (te::AudioTrack*, te::TimePosition)> onImportAudioRequest;

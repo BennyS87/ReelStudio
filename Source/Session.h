@@ -14,6 +14,14 @@ bool saveUserPreset (te::FourOscPlugin&, const juce::String& name);
 struct EffectInfo { const char* type; const char* title; const char* blurb; int rank; };
 const juce::Array<EffectInfo>& effectSlots();
 
+/** Anything holding on to parts of the current Edit (plugins, parameters, thumbnails) must let go
+    when this is called, because the Edit is destroyed straight afterwards. */
+struct EditWatcher
+{
+    virtual ~EditWatcher() = default;
+    virtual void editAboutToBeDeleted() = 0;
+};
+
 /** Owns the Tracktion Edit and every operation the UI performs on it.
     Imported audio is only ever referenced, never modified: speed, pitch, reverse and trims
     are clip settings that Tracktion renders to temporary proxy files when needed. */
@@ -32,6 +40,7 @@ public:
     te::EditItemID selectedTrack, selectedClip, lastInstrumentTrack;
     int structureVersion = 0;            // bumps when tracks/clips/plugins are added or removed
     std::function<void (const juce::String&)> onMessage;   // short user-facing notices
+    juce::ListenerList<EditWatcher> editWatchers;
 
     // ---- project ----
     void newProject();

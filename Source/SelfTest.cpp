@@ -1,4 +1,4 @@
-#include "Session.h"
+#include "MainComponent.h"
 #include <iostream>
 
 namespace Reel
@@ -222,6 +222,29 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
 
     juce::MemoryBlock after; tone.loadFileAsData (after);
     check (after == toneBytes && after.getSize() > 0, "the original audio file is byte-for-byte unchanged");
+    // ---- switching projects while the window is open (regression: crash on New project) ----
+    {
+        auto pump = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil (300); };
+        auto uiSession = std::make_unique<Session> (engine);
+        uiSession->loadDemo();
+        auto ui = std::make_unique<MainComponent> (*uiSession);
+        ui->setSize (1360, 860);
+        pump();
+        std::cout << "      window open, starting a new project" << std::endl;
+        uiSession->newProject(); pump();
+        std::cout << "      loading the demo song" << std::endl;
+        uiSession->loadDemo(); pump();
+        uiSession->select (uiSession->tracks().getFirst()); pump();
+        std::cout << "      opening a saved project" << std::endl;
+        uiSession->openProject (proj); pump();
+        std::cout << "      deleting a track" << std::endl;
+        if (auto* t = uiSession->tracks().getFirst()) uiSession->deleteTrack (*t);
+        pump();
+        uiSession->newProject(); pump();
+        ui.reset(); uiSession.reset();
+        check (true, "switch projects with the window open: new, demo, open, delete a track");
+    }
+
     std::cout << (fails == 0 ? "ALL TESTS PASSED" : juce::String (fails) + " TEST(S) FAILED") << std::endl;
     return fails;
 }
