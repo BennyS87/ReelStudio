@@ -51,13 +51,13 @@ open "build/ReelStudio_artefacts/Release/Reel Studio.app"
 | Change speed and pitch | Select an audio clip, open the **Editor** tab. Speed and pitch are independent while **Keep pitch** is ticked; untick it for tape-style speed. |
 | Cut, trim, reverse | Put the playhead on a clip and press **B** to split. Drag clip edges to trim. Right-click a clip to reverse it. |
 | Mix | Track headers have mute, solo and a volume bar. The **Mixer** tab has faders, pan and meters. |
-| Add effects | **Effects** tab: distortion, vocoder, echo, reverb. Each has an on switch. |
-| Use an effect only at certain points | Press **Automate** under an effect setting, then click points in the lane that opens under the track. Drag points to move them; right-click removes one. A point at zero turns the effect off at that moment. |
+| Add effects | **Effects** tab, **Add effect**: EQ (8 bands, live spectrum, drag the points), compressor, saturation, distortion, phaser / flanger / chorus, echo, reverb, vocoder. Effects run in order; use Earlier and Later to reorder, the switch to bypass, Remove to delete. You can add the same effect more than once. |
+| Use an effect only at certain points | Press **Automate...** on an effect and pick a setting, then click points in the lane that opens under the track. Drag points to move them; right-click removes one. A point at zero turns the effect off at that moment. |
 | Turn a sound into an instrument | Right-click an audio clip, choose **Make a playable instrument**. Reel renders that clip to a new file, finds its musical note, and creates a sampler track that plays it in tune on every key. |
 | Play notes | A MIDI keyboard connected by USB, the on-screen keyboard, or your computer keys A W S E D F T G Y H U J K (Z and X change octave). Notes go to the selected synth, sampler or drum track. |
 | Record notes | Select an instrument track, press **Record**, play, press Space to stop. |
 | Import MIDI | Drop a .mid file or use **Add track**. Each part becomes a track with a sound matched to its MIDI instrument; channel 10 becomes a drum track. Edit notes in the piano roll, change the sound in the **Sound** tab. |
-| Edit sounds | **Sound** tab. Synths start from 12 built-in sounds; every knob is editable and **Save as my sound** keeps your version. The drum kit lets you tune, shorten, balance or replace each drum. |
+| Design sounds | **Sound** tab on a synth track opens the instrument designer: 4 oscillators with unison, a 12 or 24 dB filter with its own envelope, volume envelope, 2 LFOs, 2 modulation envelopes, a modulation matrix (LFOs, envelopes, velocity, key, mod wheel or pressure to any setting), voice mode with glide, drive and chorus. Start from one of 12 sounds; **Save as my sound** keeps your version. The drum kit lets you tune, shorten, balance or replace each drum. |
 | Program drums | Select a drum clip; the **Editor** tab shows the step grid. Click a step for on, again for accent, again to clear. |
 | Save and export | **Project** menu: save, open, export a WAV mixdown, audio and MIDI settings. Work is also autosaved every 15 seconds. |
 
@@ -77,11 +77,12 @@ Keyboard: Space play or pause, Home back to start, B split, Cmd+D duplicate, Del
 | File | What it does |
 |---|---|
 | `Source/Session.*` | Everything the app does to the Tracktion edit: tracks, clips, sounds, effects, automation, transport, live MIDI, import and export. |
-| `Source/ReelPlugins.h` | The distortion and vocoder effects (custom Tracktion plugins with automatable settings). |
+| `Source/ReelPlugins.*` | All effects: EQ, compressor, saturation, distortion, phaser / flanger / chorus, echo, reverb, vocoder. |
+| `Source/EffectEditors.*` | EQ display with spectrum, compressor curve and meter, saturation curve, envelope pictures. |
 | `Source/Dsp.*` | Drum kit synthesis and pitch detection. |
 | `Source/ArrangeView.*` | The timeline: tracks, clips, ruler, loop range, automation lanes. |
 | `Source/Editors.*` | Piano roll, step grid and the audio clip editor. |
-| `Source/Panels.*` | Sound, Effects and Mixer tabs. |
+| `Source/Panels.*` | Instrument designer, effect chain and mixer tabs. |
 | `Source/MainComponent.*`, `Source/Main.cpp` | Window, toolbar, keyboard shortcuts and app start-up. |
 | `Source/SelfTest.cpp` | The automated checks. |
 

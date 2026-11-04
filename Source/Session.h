@@ -10,9 +10,10 @@ juce::StringArray userPresetNames();
 void applyPreset (te::FourOscPlugin&, const juce::String& name);   // built-in or "user:<name>"
 bool saveUserPreset (te::FourOscPlugin&, const juce::String& name);
 
-/** Effect slots in processing order. */
+/** The effects you can add to a track's chain. */
 struct EffectInfo { const char* type; const char* title; const char* blurb; int rank; };
 const juce::Array<EffectInfo>& effectSlots();
+juce::String effectTitle (te::Plugin&);
 
 /** Anything holding on to parts of the current Edit (plugins, parameters, thumbnails) must let go
     when this is called, because the Edit is destroyed straight afterwards. */
@@ -90,11 +91,15 @@ public:
     void auditionDrum (te::AudioTrack&, int voice);
 
     // ---- effects ----
+    juce::Array<te::Plugin*> effectChain (te::AudioTrack&) const;          // in processing order
+    te::Plugin* addEffect (te::AudioTrack&, const juce::String& type);      // appended to the end of the chain
+    void removeEffect (te::Plugin&);
+    void moveEffect (te::AudioTrack&, te::Plugin&, int delta);
     te::Plugin* getEffect (te::AudioTrack&, const juce::String& type) const;
     te::Plugin* ensureEffect (te::AudioTrack&, const juce::String& type);
     bool isEffectOn (te::AudioTrack&, const juce::String& type) const;
     void setEffectOn (te::AudioTrack&, const juce::String& type, bool);
-    void setEchoTiming (te::AudioTrack&, double beats);   // 0 = keep current milliseconds
+    static juce::String automationKey (te::Plugin& p, te::AutomatableParameter& ap) { return p.itemID.toString() + "/" + ap.paramID; }
 
     // ---- automation ----
     struct AutoTarget { juce::String key, label; te::AutomatableParameter* param = nullptr; };

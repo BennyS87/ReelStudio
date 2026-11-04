@@ -15,6 +15,12 @@ public:
         engine = std::make_unique<te::Engine> ("Reel Studio");
         engine->getPluginManager().createBuiltInType<Reel::DistortionPlugin>();
         engine->getPluginManager().createBuiltInType<Reel::VocoderPlugin>();
+        engine->getPluginManager().createBuiltInType<Reel::EQPlugin>();
+        engine->getPluginManager().createBuiltInType<Reel::CompressorPlugin>();
+        engine->getPluginManager().createBuiltInType<Reel::SaturationPlugin>();
+        engine->getPluginManager().createBuiltInType<Reel::PhaserPlugin>();
+        engine->getPluginManager().createBuiltInType<Reel::EchoPlugin>();
+        engine->getPluginManager().createBuiltInType<Reel::ReverbPlugin>();
 
         auto args = juce::StringArray::fromTokens (commandLine, true);
         if (args.contains ("--selftest"))

@@ -173,7 +173,7 @@ void ArrangeView::paintHeader (juce::Graphics& g, const Row& r)
     juce::String sub = kindLabel (getKind (t));
     if (getKind (t) == Kind::synth) sub << ": " << t.state.getProperty (IDs::preset, "Custom").toString().replace ("user:", "");
     if (getKind (t) == Kind::sampler) sub << ": " << t.state.getProperty (IDs::sampleName, "no sound yet").toString();
-    int fx = 0; for (auto& e : effectSlots()) if (session.isEffectOn (t, e.type)) ++fx;
+    int fx = 0; for (auto* p : session.effectChain (t)) if (p->isEnabled()) ++fx;
     if (fx) sub << ", " << fx << (fx == 1 ? " effect" : " effects");
     g.setColour (Col::muted); g.setFont (juce::FontOptions (12.5f));
     g.drawText (sub, 14, r.y + 28, headerW - 22, 16, juce::Justification::left, true);

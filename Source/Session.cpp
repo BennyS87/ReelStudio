@@ -103,13 +103,23 @@ const juce::Array<EffectInfo>& effectSlots()
     static const juce::Array<EffectInfo> slots = []
     {
         juce::Array<EffectInfo> a;
-        a.add (EffectInfo { DistortionPlugin::xmlTypeName, "Distortion", "Adds grit, from warm overdrive to broken fuzz.", 1 });
-        a.add (EffectInfo { VocoderPlugin::xmlTypeName,    "Vocoder",    "Makes the track speak through a synth. Best on vocals or speech.", 2 });
-        a.add (EffectInfo { te::DelayPlugin::xmlTypeName,  "Echo",       "Repeats the sound, locked to the tempo or free.", 3 });
-        a.add (EffectInfo { te::ReverbPlugin::xmlTypeName, "Reverb",     "Places the track in a room, hall or cave.", 4 });
+        a.add (EffectInfo { EQPlugin::xmlTypeName,         "EQ",         "Eight bands of tone shaping with a live spectrum. Drag the points.", 1 });
+        a.add (EffectInfo { CompressorPlugin::xmlTypeName, "Compressor", "Evens out levels and adds punch, with parallel mix and sidechain low cut.", 2 });
+        a.add (EffectInfo { SaturationPlugin::xmlTypeName, "Saturation", "Warmth and harmonics, from gentle tape to hard clipping.", 3 });
+        a.add (EffectInfo { DistortionPlugin::xmlTypeName, "Distortion", "Grit, from overdrive to fuzz, rectify and foldback.", 4 });
+        a.add (EffectInfo { PhaserPlugin::xmlTypeName,     "Phaser / Flanger / Chorus", "Sweeping phase shifts, jet flanges or a widening chorus.", 5 });
+        a.add (EffectInfo { EchoPlugin::xmlTypeName,       "Echo",       "Tempo-synced or free repeats, ping-pong, wobble, dirt and ducking.", 6 });
+        a.add (EffectInfo { ReverbPlugin::xmlTypeName,     "Reverb",     "Rooms to huge halls, with pre-delay, movement, ducking and freeze.", 7 });
+        a.add (EffectInfo { VocoderPlugin::xmlTypeName,    "Vocoder",    "Makes the track speak through a synth. Best on vocals or speech.", 8 });
         return a;
     }();
     return slots;
+}
+
+juce::String effectTitle (te::Plugin& p)
+{
+    for (auto& s : effectSlots()) if (p.getPluginType() == s.type) return s.title;
+    return p.getName();
 }
 
 //==============================================================================
@@ -585,32 +595,59 @@ void Session::auditionDrum (te::AudioTrack& t, int voice)
 }
 
 //==============================================================================
+static bool isEffectPlugin (te::Plugin* p)
+{
+    return p != nullptr && ! p->isSynth() && dynamic_cast<te::VolumeAndPanPlugin*> (p) == nullptr && dynamic_cast<te::LevelMeterPlugin*> (p) == nullptr
+        && dynamic_cast<te::SamplerPlugin*> (p) == nullptr && dynamic_cast<te::FourOscPlugin*> (p) == nullptr;
+}
+
+juce::Array<te::Plugin*> Session::effectChain (te::AudioTrack& t) const
+{
+    juce::Array<te::Plugin*> out;
+    for (auto* p : t.pluginList.getPlugins()) if (isEffectPlugin (p)) out.add (p);
+    return out;
+}
+
 te::Plugin* Session::getEffect (te::AudioTrack& t, const juce::String& type) const
 {
-    for (auto* p : t.pluginList.getPlugins()) if (p->getPluginType() == type) return p;
+    for (auto* p : effectChain (t)) if (p->getPluginType() == type) return p;
     return nullptr;
+}
+
+te::Plugin* Session::addEffect (te::AudioTrack& t, const juce::String& type)
+{
+    auto plugins = t.pluginList.getPlugins();
+    int index = plugins.size();
+    for (int i = 0; i < plugins.size(); ++i)
+        if (dynamic_cast<te::VolumeAndPanPlugin*> (plugins[i].get()) || dynamic_cast<te::LevelMeterPlugin*> (plugins[i].get())) { index = i; break; }
+    auto p = edit->getPluginCache().createNewPlugin (type, {});
+    if (p == nullptr) return nullptr;
+    t.pluginList.insertPlugin (p, index, nullptr);
+    p->restorePluginStateFromValueTree (p->state);
+    p->setEnabled (true);
+    return p.get();
 }
 
 te::Plugin* Session::ensureEffect (te::AudioTrack& t, const juce::String& type)
 {
     if (auto* p = getEffect (t, type)) return p;
-    int rank = 0; for (auto& s : effectSlots()) if (type == s.type) rank = s.rank;
-    auto rankOf = [] (te::Plugin* p)
-    {
-        if (dynamic_cast<te::VolumeAndPanPlugin*> (p) || dynamic_cast<te::LevelMeterPlugin*> (p)) return 100;
-        for (auto& s : effectSlots()) if (p->getPluginType() == s.type) return s.rank;
-        return 0;   // instruments
-    };
-    auto plugins = t.pluginList.getPlugins();
-    int index = plugins.size();
-    for (int i = 0; i < plugins.size(); ++i) if (rankOf (plugins[i].get()) > rank) { index = i; break; }
-    auto p = edit->getPluginCache().createNewPlugin (type, {});
-    if (p == nullptr) return nullptr;
-    if (auto* d = dynamic_cast<te::DelayPlugin*> (p.get())) { d->feedbackValue = -8.0f; d->mixValue = 0.35f; d->lengthMs = juce::roundToInt (60000.0 / getBpm() * 0.75); }
-    if (auto* r = dynamic_cast<te::ReverbPlugin*> (p.get())) { r->roomSizeValue = 0.55f; r->wetValue = 0.3f; r->dryValue = 0.5f; }
-    t.pluginList.insertPlugin (p, index, nullptr);
-    p->restorePluginStateFromValueTree (p->state);
-    return p.get();
+    return addEffect (t, type);
+}
+
+void Session::removeEffect (te::Plugin& p)
+{
+    beginAction();
+    p.deleteFromParent();
+}
+
+void Session::moveEffect (te::AudioTrack& t, te::Plugin& p, int delta)
+{
+    auto chain = effectChain (t);
+    const int i = chain.indexOf (&p), j = i + delta;
+    if (i < 0 || j < 0 || j >= chain.size()) return;
+    beginAction();
+    auto parent = p.state.getParent();
+    parent.moveChild (parent.indexOf (p.state), parent.indexOf (chain[j]->state), &undoManager());
 }
 
 bool Session::isEffectOn (te::AudioTrack& t, const juce::String& type) const
@@ -625,13 +662,6 @@ void Session::setEffectOn (te::AudioTrack& t, const juce::String& type, bool on)
     if (auto* p = on ? ensureEffect (t, type) : getEffect (t, type)) p->setEnabled (on);
 }
 
-void Session::setEchoTiming (te::AudioTrack& t, double beats)
-{
-    if (beats <= 0) return;
-    if (auto* d = dynamic_cast<te::DelayPlugin*> (getEffect (t, te::DelayPlugin::xmlTypeName)))
-        d->lengthMs = juce::jlimit (5, 2000, juce::roundToInt (60000.0 / getBpm() * beats));
-}
-
 juce::Array<Session::AutoTarget> Session::automationTargets (te::AudioTrack& t) const
 {
     juce::Array<AutoTarget> out;
@@ -640,20 +670,18 @@ juce::Array<Session::AutoTarget> Session::automationTargets (te::AudioTrack& t) 
         out.add ({ "volume/volume", "Volume", v->volParam.get() });
         out.add ({ "volume/pan", "Pan", v->panParam.get() });
     }
-    for (auto& s : effectSlots())
-        if (auto* p = getEffect (t, s.type))
-            for (auto* ap : p->getAutomatableParameters())
-            {
-                auto id = ap->paramID;
-                if (id == "mode" || id == "dry level" || id == "width") continue;
-                static const std::map<juce::String, juce::String> friendly { { "mix proportion", "amount" }, { "feedback", "repeats" }, { "wet level", "amount" },
-                                                                             { "room size", "size" }, { "damping", "darkness" }, { "mix", "amount" } };
-                auto it = friendly.find (id);
-                out.add ({ juce::String (s.type) + "/" + id, juce::String (s.title) + " " + (it != friendly.end() ? it->second : ap->getParameterName().toLowerCase()), ap });
-            }
+    juce::StringArray seen;
+    for (auto* p : effectChain (t))
+    {
+        auto title = effectTitle (*p);
+        int n = 2; while (seen.contains (title)) title = effectTitle (*p) + " " + juce::String (n++);
+        seen.add (title);
+        for (auto* ap : p->getAutomatableParameters())
+            out.add ({ automationKey (*p, *ap), title + ": " + ap->getParameterName(), ap });
+    }
     if (auto* s = getSynth (t))
-        for (auto* ap : { s->filterFreq.get(), s->filterResonance.get(), s->masterLevel.get() })
-            out.add ({ juce::String (te::FourOscPlugin::xmlTypeName) + "/" + ap->paramID, "Synth " + ap->getParameterName().toLowerCase(), ap });
+        for (auto* ap : s->getAutomatableParameters())
+            out.add ({ automationKey (*s, *ap), "Synth: " + ap->getParameterName(), ap });
     return out;
 }
 
@@ -810,7 +838,7 @@ void Session::loadDemo()
             for (auto [t, d, v] : { std::tuple<double, double, int> { 0, 3.8, 90 }, { 4, 1.5, 70 }, { 6, 1.8, 75 } })
                 c->getSequence().addNote (p, te::BeatPosition::fromBeats (i * 8 + t), te::BeatDuration::fromBeats (d), v, 0, nullptr);
     }
-    setEffectOn (*keys, te::ReverbPlugin::xmlTypeName, true);
+    setEffectOn (*keys, ReverbPlugin::xmlTypeName, true);
     if (auto* v = keys->getVolumePlugin()) v->setVolumeDb (-4.0f);
     auto* lead = addTrack (Kind::synth, "Lead"); setSynthPreset (*lead, "Pluck");
     const double mel[][3] = { { 76, 0, 1 }, { 74, 1, 0.5 }, { 72, 1.5, 0.5 }, { 69, 2, 2 }, { 72, 4, 1 }, { 74, 5, 1 }, { 76, 6, 1.5 }, { 79, 7.5, 0.5 }, { 77, 8, 2 }, { 76, 10, 1 }, { 74, 11, 1 }, { 72, 12, 3 }, { 74, 15, 1 }, { 71, 16, 2 }, { 72, 18, 1 }, { 74, 19, 1 }, { 76, 20, 3 }, { 74, 23, 0.5 }, { 72, 23.5, 0.5 }, { 74, 24, 4 } };
@@ -819,15 +847,16 @@ void Session::loadDemo()
         c->setName ("Melody");
         for (auto& m : mel) c->getSequence().addNote ((int) m[0], te::BeatPosition::fromBeats (m[1]), te::BeatDuration::fromBeats (m[2] * 0.9), 100, 0, nullptr);
     }
-    setEffectOn (*lead, te::DelayPlugin::xmlTypeName, true);
-    setEffectOn (*lead, te::ReverbPlugin::xmlTypeName, true);
-    if (auto* d = dynamic_cast<te::DelayPlugin*> (getEffect (*lead, te::DelayPlugin::xmlTypeName)))
+    setEffectOn (*lead, EchoPlugin::xmlTypeName, true);
+    setEffectOn (*lead, ReverbPlugin::xmlTypeName, true);
+    if (auto* d = dynamic_cast<EchoPlugin*> (getEffect (*lead, EchoPlugin::xmlTypeName)))
     {
-        auto& curve = d->mixProportion->getCurve();
-        for (auto [b, v] : { std::pair<double, float> { 16, 0.1f }, { 30, 0.1f }, { 32, 0.75f }, { 40, 0.75f }, { 44, 0.15f } })
+        auto& curve = d->mix->getCurve();
+        for (auto [b, v] : { std::pair<double, float> { 16, 0.1f }, { 30, 0.1f }, { 32, 0.6f }, { 40, 0.6f }, { 44, 0.15f } })
             curve.addPoint (toTime (te::BeatPosition::fromBeats (b)), v, 0.0f);
-        showAutomation (*lead, juce::String (te::DelayPlugin::xmlTypeName) + "/" + d->mixProportion->paramID);
+        showAutomation (*lead, automationKey (*d, *d->mix));
     }
+    if (auto* r = dynamic_cast<ReverbPlugin*> (getEffect (*keys, ReverbPlugin::xmlTypeName))) r->mix->setParameter (0.35f, juce::sendNotification);
     if (auto* v = lead->getVolumePlugin()) v->setVolumeDb (-3.0f);
     for (auto [t, db] : { std::pair<te::AudioTrack*, float> { drums, -3.0f }, { bass, -4.0f }, { keys, -7.0f }, { lead, -6.0f } })
         if (auto* v = t->getVolumePlugin()) v->setVolumeDb (db);

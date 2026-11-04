@@ -1,39 +1,8 @@
 #include "Panels.h"
+#include "EffectEditors.h"
 
 namespace Reel
 {
-//==============================================================================
-/** A titled, rounded section that flows its children. */
-class Box : public juce::Component
-{
-public:
-    Box (juce::String t, juce::String d = {}) : title (std::move (t)), desc (std::move (d)) {}
-    template <typename T> T* add (T* c, int w, int h) { kids.add (c); c->setSize (w, h); addAndMakeVisible (c); return c; }
-    int heightFor (int w)
-    {
-        int x = 12, y = top(), lineH = 0;
-        for (auto* c : kids) { if (x + c->getWidth() > w - 10 && x > 12) { x = 12; y += lineH + 6; lineH = 0; } x += c->getWidth() + 6; lineH = juce::jmax (lineH, c->getHeight()); }
-        return y + lineH + 12;
-    }
-    void resized() override
-    {
-        int x = 12, y = top(), lineH = 0;
-        for (auto* c : kids) { if (x + c->getWidth() > getWidth() - 10 && x > 12) { x = 12; y += lineH + 6; lineH = 0; } c->setTopLeftPosition (x, y); x += c->getWidth() + 6; lineH = juce::jmax (lineH, c->getHeight()); }
-    }
-    void paint (juce::Graphics& g) override
-    {
-        auto r = getLocalBounds().toFloat().reduced (0.5f);
-        g.setColour (Col::panel2); g.fillRoundedRectangle (r, 9.0f);
-        g.setColour (Col::line2); g.drawRoundedRectangle (r, 9.0f, 1.0f);
-        g.setColour (dimmed ? Col::muted : Col::text); g.setFont (juce::FontOptions (17.0f, juce::Font::bold));
-        g.drawText (title, 12, 8, getWidth() - 120, 20, juce::Justification::left);
-        if (desc.isNotEmpty()) { g.setColour (Col::muted); g.setFont (juce::FontOptions (12.5f)); g.drawFittedText (desc, 12, 30, getWidth() - 24, 32, juce::Justification::topLeft, 2); }
-    }
-    int top() const { return desc.isNotEmpty() ? 64 : 34; }
-    juce::String title, desc; bool dimmed = false;
-    juce::OwnedArray<juce::Component> kids;
-};
-
 namespace
 {
     juce::ComboBox* combo (juce::StringArray names, juce::Array<int> ids, int current, std::function<void (int)> onChange)
@@ -119,12 +88,13 @@ void SoundPanel::buildSynth (te::AudioTrack& t, te::FourOscPlugin& s)
 {
     auto* um = &session.undoManager();
     auto id = t.itemID;
+    te::Plugin::Ptr keep (&s);
     const auto current = t.state.getProperty (IDs::preset, "Soft keys").toString();
     juce::StringArray names; juce::Array<int> ids; int sel = 0;
     auto builtIns = builtInPresetNames(), users = userPresetNames();
     for (int i = 0; i < builtIns.size(); ++i) { names.add (builtIns[i]); ids.add (i + 1); if (builtIns[i] == current) sel = i + 1; }
     for (int i = 0; i < users.size(); ++i) { names.add ("Yours: " + users[i]); ids.add (1000 + i); if ("user:" + users[i] == current) sel = 1000 + i; }
-    heading ("Sound", false);
+    heading ("Instrument designer", false);
     auto* presetBox = add (combo (names, ids, sel, [this, id, builtIns, users] (int v)
     {
         if (auto* t = te::findAudioTrackForID (*session.edit, id))
@@ -133,7 +103,7 @@ void SoundPanel::buildSynth (te::AudioTrack& t, te::FourOscPlugin& s)
     if (sel == 0) presetBox->setText ("Custom sound", juce::dontSendNotification);
     add (button ("Save as my sound", [this, id]
     {
-        auto* w = new juce::AlertWindow ("Save this sound", "It will appear in the Sound list for every synth track.", juce::MessageBoxIconType::NoIcon);
+        auto* w = new juce::AlertWindow ("Save this sound", "It will appear in the sound list for every synth track.", juce::MessageBoxIconType::NoIcon);
         w->addTextEditor ("name", "My sound");
         w->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey)); w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
         w->enterModalState (true, juce::ModalCallbackFunction::create ([this, w, id] (int r)
@@ -144,30 +114,161 @@ void SoundPanel::buildSynth (te::AudioTrack& t, te::FourOscPlugin& s)
         }), true);
     }), 150, 30);
     add (button ("Reset", [this, id, current] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) { session.beginAction(); session.setSynthPreset (*t, current); rebuildNow(); } }), 80, 30);
+    hintText ("Start from a sound above, then shape it: four oscillators, a filter with its own envelope, two LFOs and two modulation envelopes you can route to any setting. "
+              "Play notes while you turn knobs to hear changes straight away.", 900, 40);
 
-    const juce::StringArray waves { "Off", "Sine", "Triangle", "Saw", "Square", "Noise" };
-    const juce::Array<int> waveIds { 1, 2, 5, 4, 3, 6 };   // Oscillator::Waves value + 1
+    auto knob = [um] (Box* box, te::AutomatableParameter::Ptr p, const juce::String& label, std::function<juce::String (float)> fmt = nullptr)
+    {
+        auto* k = box->add (new ParamKnob (p, label, um), 68, 78);
+        if (fmt) { k->formatter = std::move (fmt); k->refresh(); }
+    };
+    auto toggle = [um] (const juce::String& text, juce::CachedValue<bool>& v)
+    {
+        auto* b = new juce::ToggleButton (text); b->setToggleState (v.get(), juce::dontSendNotification);
+        auto* vp = &v; b->onClick = [b, vp, um] { um->beginNewTransaction(); *vp = b->getToggleState(); }; return b;
+    };
+    auto secs = [] (float v) { return v < 1.0f ? juce::String (juce::roundToInt (v * 1000)) + " ms" : juce::String (v, 2) + " s"; };
+    auto pctOf100 = [] (float v) { return juce::String (juce::roundToInt (v)) + "%"; };
+    auto noteHz = [] (float v) { return Fmt::hz ((float) (440.0 * std::pow (2.0, (v - 69.0) / 12.0))); };
+
+    // ---- oscillators ----
+    const juce::StringArray waveNames { "Off", "Sine", "Square", "Saw", "Triangle", "Noise" };   // te::Oscillator::Waves order
     lineBreak();
     for (int i = 0; i < juce::jmin (4, s.oscParams.size()); ++i)
     {
         auto& o = *s.oscParams[i];
-        auto* box = add (new Box ("Tone " + juce::String (i + 1)), 330, 100);
-        auto* wave = box->add (combo (waves, waveIds, o.waveShapeValue.get() + 1, [this, &s, i] (int v) { session.beginAction(); s.oscParams[i]->waveShapeValue = v - 1; }), 92, 28);
-        juce::ignoreUnused (wave);
-        box->add (new ParamKnob (o.tune, "Pitch", um), 62, 78);
-        box->add (new ParamKnob (o.level, "Level", um), 62, 78);
-        box->add (new ParamKnob (o.detune, "Spread", um), 62, 78);
+        auto* box = add (new Box ("Oscillator " + juce::String (i + 1)), 540, 100);
+        box->accent = Col::acc;
+        box->add (captionLabel ("Wave"), 40, 28);
+        box->add (makeChoiceBox (o.waveShapeValue, waveNames, {}, um), 104, 28);
+        box->add (captionLabel ("Unison voices"), 92, 28);
+        box->add (makeChoiceBox (o.voicesValue, { "1", "2", "3", "4", "5", "6", "7", "8" }, { 1, 2, 3, 4, 5, 6, 7, 8 }, um), 64, 28);
+        box->breakBefore();
+        knob (box, o.tune, "Pitch", [] (float v) { return (v > 0 ? "+" : "") + juce::String (juce::roundToInt (v)) + " st"; });
+        knob (box, o.fineTune, "Fine", [] (float v) { return juce::String (juce::roundToInt (v)) + " ct"; });
+        knob (box, o.level, "Level", Fmt::db);
+        knob (box, o.pulseWidth, "Pulse width", Fmt::pct);
+        knob (box, o.detune, "Unison detune", [] (float v) { return juce::String (juce::roundToInt (v * 200)) + "%"; });
+        knob (box, o.spread, "Stereo spread", pctOf100);
+        knob (box, o.pan, "Pan", [] (float v) { return std::abs (v) < 0.01f ? juce::String ("C") : (v < 0 ? "L" : "R") + juce::String (juce::roundToInt (std::abs (v) * 100)); });
     }
-    auto* f = add (new Box ("Filter", "Brightness and how it sweeps when you press a key."), 620, 100);
-    f->add (combo ({ "Off", "Low pass", "High pass", "Band pass" }, { 1, 2, 3, 4 }, s.filterTypeValue.get() + 1, [this, &s] (int v) { session.beginAction(); s.filterTypeValue = v - 1; }), 110, 28);
-    for (auto [p, n] : { std::pair<te::AutomatableParameter*, const char*> { s.filterFreq.get(), "Brightness" }, { s.filterResonance.get(), "Resonance" }, { s.filterAmount.get(), "Sweep" },
-                        { s.filterAttack.get(), "Sweep in" }, { s.filterDecay.get(), "Sweep fall" }, { s.filterSustain.get(), "Sweep hold" }, { s.filterRelease.get(), "Sweep out" } })
-        f->add (new ParamKnob (p, n, um), 66, 78);
-    auto* a = add (new Box ("Volume shape"), 420, 100);
-    for (auto [p, n] : { std::pair<te::AutomatableParameter*, const char*> { s.ampAttack.get(), "Attack" }, { s.ampDecay.get(), "Decay" }, { s.ampSustain.get(), "Sustain" },
-                        { s.ampRelease.get(), "Release" }, { s.ampVelocity.get(), "Touch" }, { s.masterLevel.get(), "Level" } })
-        a->add (new ParamKnob (p, n, um), 62, 78);
-    hintText ("Play with a MIDI keyboard, the keys at the bottom, or your computer: A W S E D F T G Y H U J K (Z and X change octave). Changes apply to the next note.");
+
+    // ---- filter and amp ----
+    auto* f = add (new Box ("Filter", "Cuts or boosts parts of the sound. The envelope sweeps the cutoff each time you press a key."), 700, 100);
+    f->accent = Col::acc;
+    f->add (captionLabel ("Type"), 36, 28);
+    f->add (makeChoiceBox (s.filterTypeValue, { "Off", "Low pass", "High pass", "Band pass" }, { 0, 1, 2, 3 }, um), 110, 28);
+    f->add (captionLabel ("Slope"), 40, 28);
+    f->add (makeChoiceBox (s.filterSlopeValue, { "12 dB/oct", "24 dB/oct" }, { 12, 24 }, um), 104, 28);
+    f->add (new EnvelopeDisplay (s.filterAttack, s.filterDecay, s.filterSustain, s.filterRelease, Col::acc), 220, 60);
+    f->breakBefore();
+    knob (f, s.filterFreq, "Cutoff", noteHz);
+    knob (f, s.filterResonance, "Resonance", pctOf100);
+    knob (f, s.filterAmount, "Env amount", [] (float v) { return juce::String (juce::roundToInt (v * 100)) + "%"; });
+    knob (f, s.filterKey, "Key track", pctOf100);
+    knob (f, s.filterVelocity, "Velocity", pctOf100);
+    knob (f, s.filterAttack, "Attack", secs); knob (f, s.filterDecay, "Decay", secs); knob (f, s.filterSustain, "Sustain", pctOf100); knob (f, s.filterRelease, "Release", secs);
+
+    auto* a = add (new Box ("Volume envelope", "How each note fades in, holds and fades out."), 520, 100);
+    a->accent = Col::acc;
+    a->add (new EnvelopeDisplay (s.ampAttack, s.ampDecay, s.ampSustain, s.ampRelease, Col::ok), 240, 60);
+    a->add (toggle ("Analog drift", s.ampAnalogValue), 120, 28);
+    a->breakBefore();
+    knob (a, s.ampAttack, "Attack", secs); knob (a, s.ampDecay, "Decay", secs); knob (a, s.ampSustain, "Sustain", pctOf100); knob (a, s.ampRelease, "Release", secs);
+    knob (a, s.ampVelocity, "Velocity", pctOf100);
+
+    // ---- modulators ----
+    const juce::StringArray lfoWaves { "Off", "Sine", "Triangle", "Saw up", "Saw down", "Square", "Random" };
+    for (int i = 0; i < juce::jmin (2, s.lfoParams.size()); ++i)
+    {
+        auto& l = *s.lfoParams[i];
+        auto* box = add (new Box ("LFO " + juce::String (i + 1), "A slow wobble. Route it below to make any setting move."), 360, 100);
+        box->add (makeChoiceBox (l.waveShapeValue, lfoWaves, { 0, 1, 2, 3, 4, 5, 6 }, um), 104, 28);
+        box->add (toggle ("Sync to tempo", l.syncValue), 120, 28);
+        auto* beat = box->add (new juce::ComboBox(), 90, 28);
+        const float beats[] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f };
+        const char* beatNames[] = { "1/16", "1/8", "1/4", "1/2", "1 bar", "2 bars", "4 bars" };
+        int best = 3; for (int k = 0; k < 7; ++k) { beat->addItem (beatNames[k], k + 1); if (std::abs (beats[k] - l.beatValue.get()) < 1e-3f) best = k; }
+        beat->setSelectedId (best + 1, juce::dontSendNotification);
+        auto* bv = &l.beatValue;
+        beat->onChange = [beat, bv, um] { const float b[] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f, 16.0f }; um->beginNewTransaction(); *bv = b[beat->getSelectedId() - 1]; };
+        box->breakBefore();
+        knob (box, l.rate, "Rate (free)", [] (float v) { return juce::String (v, v < 10 ? 2 : 1) + " Hz"; });
+        knob (box, l.depth, "Depth", Fmt::pct);
+    }
+    for (int i = 0; i < juce::jmin (2, s.modEnvParams.size()); ++i)
+    {
+        auto& m = *s.modEnvParams[i];
+        auto* box = add (new Box ("Mod envelope " + juce::String (i + 1), "A shape that plays on every note. Route it below."), 330, 100);
+        knob (box, m.modAttack, "Attack", secs); knob (box, m.modDecay, "Decay", secs); knob (box, m.modSustain, "Sustain", pctOf100); knob (box, m.modRelease, "Release", secs);
+    }
+
+    // ---- modulation matrix ----
+    using MS = te::FourOscPlugin::ModSource;
+    const std::vector<std::pair<MS, juce::String>> sources { { MS::lfo1, "LFO 1" }, { MS::lfo2, "LFO 2" }, { MS::env1, "Mod envelope 1" }, { MS::env2, "Mod envelope 2" },
+        { MS::midiVelocity, "Velocity" }, { MS::midiNoteNum, "Note (key)" }, { (MS) (MS::ccBankSelect + 1), "Mod wheel" }, { MS::mpePressure, "Pressure" } };
+    auto* mm = add (new Box ("Modulation", "Each route makes a modulator move a setting. Negative amounts move it the other way."), 760, 100);
+    mm->accent = Col::acc;
+    juce::Array<te::AutomatableParameter*> dests;
+    for (auto* p : s.getAutomatableParameters()) dests.add (p);
+    int routes = 0;
+    for (auto* p : dests)
+        for (auto src : s.getModulationSources (p))
+        {
+            juce::String srcName = s.modulationSourceToName (src);
+            for (auto& sp : sources) if (sp.first == src) srcName = sp.second;
+            mm->breakBefore();
+            auto* l = mm->add (new juce::Label ({}, srcName + "  to  " + p->getParameterName()), 300, 28);
+            l->setColour (juce::Label::textColourId, juce::Colours::white);
+            auto* sl = mm->add (new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight), 300, 28);
+            sl->setRange (-1.0, 1.0, 0.01); sl->setValue (s.getModulationDepth (src, p), juce::dontSendNotification);
+            sl->setTextBoxStyle (juce::Slider::TextBoxRight, false, 56, 22);
+            sl->setScrollWheelEnabled (false);
+            te::AutomatableParameter::Ptr pp (p);
+            sl->onDragStart = [um] { um->beginNewTransaction(); };
+            sl->onValueChange = [keep, pp, src, sl] { if (auto* syn = dynamic_cast<te::FourOscPlugin*> (keep.get())) syn->setModulationDepth (src, pp, (float) sl->getValue()); };
+            mm->add (button ("Remove", [this, keep, pp, src]
+            {
+                if (auto* syn = dynamic_cast<te::FourOscPlugin*> (keep.get())) { session.beginAction(); syn->clearModulation (src, pp); }
+                juce::Component::SafePointer<SoundPanel> sp (this); juce::MessageManager::callAsync ([sp] { if (sp) sp->rebuildNow(); });
+            }), 80, 28);
+            ++routes;
+        }
+    if (routes == 0) { mm->breakBefore(); auto* l = mm->add (captionLabel ("No routes yet. Try LFO 1 to Filter Freq for a classic wobble."), 500, 28); juce::ignoreUnused (l); }
+    mm->breakBefore();
+    juce::StringArray srcNames; for (auto& sp : sources) srcNames.add (sp.second);
+    juce::StringArray destNames; for (auto* p : dests) destNames.add (p->getParameterName());
+    auto* srcBox = mm->add (new juce::ComboBox(), 170, 28); for (int i = 0; i < srcNames.size(); ++i) srcBox->addItem (srcNames[i], i + 1); srcBox->setSelectedId (1, juce::dontSendNotification);
+    mm->add (captionLabel ("to"), 22, 28);
+    auto* dstBox = mm->add (new juce::ComboBox(), 220, 28); for (int i = 0; i < destNames.size(); ++i) dstBox->addItem (destNames[i], i + 1);
+    dstBox->setSelectedId (juce::jmax (1, destNames.indexOf ("Filter Freq") + 1), juce::dontSendNotification);
+    mm->add (button ("Add route", [this, keep, srcBox, dstBox, sources, dests]
+    {
+        auto* syn = dynamic_cast<te::FourOscPlugin*> (keep.get());
+        const int si = srcBox->getSelectedId() - 1, di = dstBox->getSelectedId() - 1;
+        if (syn == nullptr || si < 0 || di < 0) return;
+        session.beginAction();
+        syn->setModulationDepth (sources[(size_t) si].first, dests[di], 0.5f);
+        juce::Component::SafePointer<SoundPanel> sp (this); juce::MessageManager::callAsync ([sp] { if (sp) sp->rebuildNow(); });
+    }), 100, 28);
+
+    // ---- voice and character ----
+    auto* v = add (new Box ("Voice", "Mono plays one note at a time; legato glides between held notes."), 440, 100);
+    v->add (makeChoiceBox (s.voiceModeValue, { "Mono", "Legato", "Poly" }, { 0, 1, 2 }, um), 100, 28);
+    v->add (captionLabel ("Max notes"), 70, 28);
+    v->add (makeChoiceBox (s.voicesValue, { "1", "2", "4", "8", "16", "32" }, { 1, 2, 4, 8, 16, 32 }, um), 70, 28);
+    v->breakBefore();
+    knob (v, s.legato, "Glide", [] (float x) { return juce::String (juce::roundToInt (x)) + " ms"; });
+    knob (v, s.masterLevel, "Level", Fmt::db);
+    auto* ch = add (new Box ("Character", "Built-in drive and chorus, before the track's effects."), 620, 100);
+    ch->add (toggle ("Drive", s.distortionOnValue), 80, 28);
+    knob (ch, s.distortion, "Drive", Fmt::pct);
+    ch->add (toggle ("Chorus", s.chorusOnValue), 86, 28);
+    knob (ch, s.chorusSpeed, "Speed", [] (float x) { return juce::String (x, 2) + " Hz"; });
+    knob (ch, s.chorusDepth, "Depth", [] (float x) { return juce::String (x, 1) + " ms"; });
+    knob (ch, s.chorusWidth, "Width", Fmt::pct);
+    knob (ch, s.chorusMix, "Mix", Fmt::pct);
+    hintText ("Play with a MIDI keyboard, the keys at the bottom, or your computer: A W S E D F T G Y H U J K (Z and X change octave).");
 }
 
 void SoundPanel::buildSampler (te::AudioTrack& t)
@@ -257,70 +358,48 @@ void SoundPanel::buildKit (te::AudioTrack& t)
 void EffectsPanel::build()
 {
     auto* t = session.getSelectedTrack();
-    if (t == nullptr) { hintText ("Select a track to add distortion, echo, reverb or the vocoder."); return; }
+    if (t == nullptr) { hintText ("Select a track to build its effect chain."); return; }
     auto id = t->itemID;
-    auto* um = &session.undoManager();
-    hintText ("Effects shape the whole track. To use one only at certain moments, or change it over time, press Automate and click points in the lane "
-              "that opens under the track. A point at zero turns the effect off at that moment.", 900, 40);
-    lineBreak();
-    for (auto& slot : effectSlots())
+    heading ("Effects on " + t->getName(), false);
+    auto* addBox = add (new juce::ComboBox(), 230, 30);
+    addBox->setTextWhenNothingSelected ("Add effect...");
+    for (int i = 0; i < effectSlots().size(); ++i) addBox->addItem (effectSlots()[i].title, i + 1);
+    addBox->onChange = [this, id, addBox]
     {
-        const juce::String type = slot.type;
-        auto* p = session.getEffect (*t, type);
-        const bool on = p != nullptr && p->isEnabled();
-        auto* box = add (new Box (slot.title, slot.blurb), 330, 160);
-        box->dimmed = ! on;
-        auto* tog = box->add (new juce::ToggleButton (on ? "On" : "Off"), 70, 26);
-        tog->setToggleState (on, juce::dontSendNotification);
-        tog->onClick = [this, id, type, tog] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) session.setEffectOn (*t, type, tog->getToggleState()); rebuildNow(); };
-        if (p == nullptr) { auto* l = box->add (new juce::Label ({}, "Turn it on to adjust it."), 200, 26); styleHint (*l); continue; }
-        auto automate = [&] (te::AutomatableParameter* ap)
+        const int k = addBox->getSelectedId(); if (k <= 0) return;
+        if (auto* t = te::findAudioTrackForID (*session.edit, id)) { session.beginAction(); session.addEffect (*t, effectSlots()[k - 1].type); }
+    };
+    hintText ("Sound flows through the chain in order. Use the arrows to reorder. Automate opens a lane under the track where you click points "
+              "to change any setting over time, for example an effect only in the chorus.", 900, 40);
+    auto chain = session.effectChain (*t);
+    if (chain.isEmpty()) { hintText ("No effects yet. Choose one from Add effect: EQ, compressor, saturation, distortion, phaser, echo, reverb or vocoder."); return; }
+    lineBreak();
+    for (int i = 0; i < chain.size(); ++i)
+    {
+        te::Plugin::Ptr pp (chain[i]);
+        juce::String blurb; for (auto& e : effectSlots()) if (pp->getPluginType() == e.type) blurb = e.blurb;
+        auto* box = new Box (juce::String (i + 1) + ".  " + effectTitle (*pp), blurb);
+        box->dimmed = ! pp->isEnabled();
+        box->accent = pp->isEnabled() ? Col::acc : juce::Colour();
+        auto* on = box->add (new juce::ToggleButton ("On"), 56, 26);
+        on->setToggleState (pp->isEnabled(), juce::dontSendNotification);
+        on->onClick = [this, pp, on, box] { session.beginAction(); pp->setEnabled (on->getToggleState()); box->dimmed = ! on->getToggleState(); box->accent = on->getToggleState() ? Col::acc : juce::Colour(); box->repaint(); };
+        box->add (button ("Earlier", [this, id, pp] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) session.moveEffect (*t, *pp, -1); }), 70, 26)->setEnabled (i > 0);
+        box->add (button ("Later", [this, id, pp] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) session.moveEffect (*t, *pp, 1); }), 60, 26)->setEnabled (i < chain.size() - 1);
+        box->add (button ("Automate...", [this, id, pp]
         {
-            const auto key = type + "/" + ap->paramID;
-            auto* b = box->add (button (ap->hasAutomationPoints() ? "Automated" : "Automate", [this, id, key]
+            juce::PopupMenu m; auto params = pp->getAutomatableParameters();
+            for (int k = 0; k < params.size(); ++k) m.addItem (k + 1, params[k]->getParameterName() + (params[k]->hasAutomationPoints() ? "  (automated)" : ""));
+            m.showMenuAsync (juce::PopupMenu::Options(), [this, id, pp, params] (int r)
             {
-                if (auto* t = te::findAudioTrackForID (*session.edit, id))
-                {
-                    session.showAutomation (*t, key);
-                    if (session.onMessage) session.onMessage ("Click in the lane under " + t->getName() + " to add points, then drag them.");
-                }
-            }), 92, 24);
-            if (ap->hasAutomationPoints()) b->setColour (juce::TextButton::textColourOffId, Col::acc);
-        };
-        auto knob = [&] (te::AutomatableParameter* ap, const char* label, bool canAutomate)
-        {
-            box->add (new ParamKnob (ap, label, um), 66, 78);
-            juce::ignoreUnused (canAutomate);
-        };
-        if (auto* d = dynamic_cast<DistortionPlugin*> (p))
-        {
-            box->add (combo ({ "Overdrive", "Fuzz", "Bit crush" }, { 1, 2, 3 }, d->typeValue.get() + 1, [this, d] (int v) { session.beginAction(); d->typeValue = v - 1; }), 110, 26);
-            knob (d->drive.get(), "Drive", true); knob (d->tone.get(), "Tone", false); knob (d->mix.get(), "Amount", true);
-            automate (d->mix.get()); automate (d->drive.get());
-        }
-        else if (auto* v = dynamic_cast<VocoderPlugin*> (p))
-        {
-            box->add (combo ({ "Single note", "Chord", "Whisper" }, { 1, 2, 3 }, v->carrierValue.get() + 1, [this, v] (int x) { session.beginAction(); v->carrierValue = x - 1; }), 110, 26);
-            juce::StringArray notes; juce::Array<int> ids; for (int n = 36; n <= 72; ++n) { notes.add (noteName (n)); ids.add (n); }
-            box->add (combo (notes, ids, v->noteValue.get(), [this, v] (int x) { session.beginAction(); v->noteValue = x; }), 80, 26);
-            knob (v->breath.get(), "Breath", false); knob (v->level.get(), "Output", false); knob (v->mix.get(), "Amount", true);
-            automate (v->mix.get());
-        }
-        else if (auto* e = dynamic_cast<te::DelayPlugin*> (p))
-        {
-            const double divs[] = { 0, 0.25, 0.5, 0.75, 1, 1.5, 2 };
-            box->add (combo ({ "Free time", "1/16", "1/8", "Dotted 1/8", "1/4", "Dotted 1/4", "1/2" }, { 1, 2, 3, 4, 5, 6, 7 }, 1,
-                             [this, id, divs] (int x) { if (auto* t = te::findAudioTrackForID (*session.edit, id)) { session.beginAction(); session.setEchoTiming (*t, divs[x - 1]); } }), 120, 26);
-            box->add (new ValueKnob ("Time", 20, 1500, 1, 375, [e] { return (double) e->lengthMs.get(); }, [e] (double v) { e->lengthMs = (int) v; },
-                                     [] (double v) { return juce::String ((int) v) + " ms"; }, 0.5), 66, 78);
-            knob (e->feedbackDb.get(), "Repeats", true); knob (e->mixProportion.get(), "Amount", true);
-            automate (e->mixProportion.get()); automate (e->feedbackDb.get());
-        }
-        else if (auto* r = dynamic_cast<te::ReverbPlugin*> (p))
-        {
-            knob (r->roomSizeParam.get(), "Size", false); knob (r->dampParam.get(), "Darkness", false); knob (r->wetParam.get(), "Amount", true);
-            automate (r->wetParam.get());
-        }
+                auto* t = te::findAudioTrackForID (*session.edit, id); if (t == nullptr || r <= 0) return;
+                session.showAutomation (*t, Session::automationKey (*pp, *params[r - 1]));
+                if (session.onMessage) session.onMessage ("Click in the lane under " + t->getName() + " to add points for " + params[r - 1]->getParameterName() + ".");
+            });
+        }), 96, 26);
+        box->add (button ("Remove", [this, pp] { session.removeEffect (*pp); }), 76, 26);
+        const int w = buildEffectEditor (*box, session, *pp);
+        add (box, w, 100);
     }
 }
 
@@ -336,6 +415,7 @@ namespace
             slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
             slider.setRange (0.0, 1.0); slider.setValue (v.getSliderPos(), juce::dontSendNotification);
             slider.setDoubleClickReturnValue (true, te::decibelsToVolumeFaderPosition (0.0f));
+            slider.setScrollWheelEnabled (false);
             slider.onDragStart = [this] { if (um) um->beginNewTransaction(); };
             slider.onValueChange = [this] { vol->setSliderPos ((float) slider.getValue()); update(); };
             addAndMakeVisible (slider);

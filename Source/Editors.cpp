@@ -359,7 +359,7 @@ namespace
     {
         auto* s = own (owner, new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight));
         s->setRange (min, max, step); s->setValue (value, juce::dontSendNotification); s->setTextValueSuffix (suffix);
-        s->setTextBoxStyle (juce::Slider::TextBoxRight, false, 72, 22); s->setSize (230, 30); return s;
+        s->setTextBoxStyle (juce::Slider::TextBoxRight, false, 72, 22); s->setSize (230, 30); s->setScrollWheelEnabled (false); return s;
     }
     juce::Label* makeLabel (juce::OwnedArray<juce::Component>& owner, const juce::String& text, int w, bool muted = true)
     {

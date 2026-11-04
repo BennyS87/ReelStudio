@@ -148,26 +148,114 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
     // ---- effects and automation ----
     for (auto& e : effectSlots()) s.setEffectOn (*audioTrack, e.type, true);
     int on = 0; for (auto& e : effectSlots()) if (s.isEffectOn (*audioTrack, e.type)) ++on;
-    check (on == 4, "distortion, vocoder, echo and reverb all switch on");
+    check (on == effectSlots().size(), "all " + juce::String (effectSlots().size()) + " effects switch on");
     auto order = juce::StringArray(); for (auto* p : audioTrack->pluginList.getPlugins()) order.add (p->getPluginType());
     std::cout << "      plugin order: " << order.joinIntoString (" > ") << std::endl;
-    if (auto* d = dynamic_cast<te::DelayPlugin*> (s.getEffect (*audioTrack, te::DelayPlugin::xmlTypeName)))
+    if (auto* d = dynamic_cast<EchoPlugin*> (s.getEffect (*audioTrack, EchoPlugin::xmlTypeName)))
     {
-        auto& curve = d->mixProportion->getCurve();
+        auto& curve = d->mix->getCurve();
         curve.addPoint (te::TimePosition(), 0.0f, 0.0f); curve.addPoint (te::TimePosition::fromSeconds (1), 0.8f, 0.0f); curve.addPoint (te::TimePosition::fromSeconds (2), 0.0f, 0.0f);
-        check (d->mixProportion->hasAutomationPoints(), "echo amount automated at three points");
+        check (d->mix->hasAutomationPoints(), "echo amount automated at three points");
     }
     check (s.automationTargets (*audioTrack).size() >= 8, "automation lane offers volume, pan and effect settings (" + juce::String (s.automationTargets (*audioTrack).size()) + ")");
     auto f6 = dir.getChildFile ("effects.wav");
     renderTrack (s, *audioTrack, f6, { te::TimePosition(), te::TimePosition::fromSeconds (5) });
     auto st6 = analyse (f6);
-    check (st6.rms > 0.01 && st6.finite, "all four effects render cleanly (rms " + juce::String (st6.rms, 3) + ", peak " + juce::String (st6.peak, 2) + ")");
+    check (st6.rms > 0.01 && st6.finite, "every effect switched on at once renders cleanly (rms " + juce::String (st6.rms, 3) + ", peak " + juce::String (st6.peak, 2) + ")");
     for (auto& e : effectSlots()) s.setEffectOn (*audioTrack, e.type, juce::String (e.type) == juce::String (VocoderPlugin::xmlTypeName));
     auto f7 = dir.getChildFile ("vocoder.wav");
     renderTrack (s, *audioTrack, f7, getClip()->getEditTimeRange());
     auto st7 = analyse (f7);
     check (st7.rms > 0.01 && st7.finite, "vocoder speaks the audio through its synth (rms " + juce::String (st7.rms, 3) + ")");
     s.setEffectOn (*audioTrack, VocoderPlugin::xmlTypeName, false);
+
+    // ---- each new effect does its job ----
+    {
+        auto* ft = s.addTrack (Kind::audio, "FX test");
+        s.importAudio (tone, ft, te::TimePosition());
+        const te::TimeRange range (te::TimePosition(), te::TimePosition::fromSeconds (3.0)), longRange (te::TimePosition(), te::TimePosition::fromSeconds (5.0));
+        auto renderStats = [&] (const juce::String& name, te::TimeRange rg) { auto f = dir.getChildFile (name + ".wav"); renderTrack (s, *ft, f, rg); return analyse (f); };
+        auto dry = renderStats ("fx-dry", range);
+        auto setP = [] (te::AutomatableParameter* p, float v) { p->setParameter (v, juce::sendNotification); };
+
+        auto* eq = dynamic_cast<EQPlugin*> (s.addEffect (*ft, EQPlugin::xmlTypeName));
+        eq->bands[0].on = 1; setP (eq->bands[0].freq, 1000.0f); eq->bands[0].slope = 2;
+        auto cut = renderStats ("fx-eq-cut", range);
+        check (cut.rms < dry.rms * 0.35, "EQ low cut at 1 kHz removes the low tone (rms " + juce::String (dry.rms, 3) + " to " + juce::String (cut.rms, 3) + ")");
+        eq->bands[0].on = 0; setP (eq->bands[2].freq, 220.0f); setP (eq->bands[2].gain, 12.0f); setP (eq->bands[2].q, 1.0f);
+        auto boost = renderStats ("fx-eq-boost", range);
+        check (boost.rms > dry.rms * 1.8, "EQ bell +12 dB at 220 Hz makes the tone louder (rms " + juce::String (boost.rms, 3) + ")");
+        check (std::abs (eq->responseDb (220.0) - 12.0) < 0.6, "EQ curve display agrees: " + juce::String (eq->responseDb (220.0), 1) + " dB at 220 Hz");
+        s.removeEffect (*eq);
+
+        auto* cp = dynamic_cast<CompressorPlugin*> (s.addEffect (*ft, CompressorPlugin::xmlTypeName));
+        setP (cp->threshold, -30.0f); setP (cp->ratio, 10.0f);
+        auto comp = renderStats ("fx-comp", range);
+        check (comp.rms < dry.rms * 0.6 && cp->grDb.load() < -3.0f, "compressor turns loud parts down (gain reduction " + juce::String (cp->grDb.load(), 1) + " dB)");
+        s.removeEffect (*cp);
+
+        auto* sat = dynamic_cast<SaturationPlugin*> (s.addEffect (*ft, SaturationPlugin::xmlTypeName));
+        setP (sat->drive, 24.0f);
+        auto st = renderStats ("fx-sat", range);
+        auto sp = detectPitch (dir.getChildFile ("fx-sat.wav"), 0.3, 1.0);
+        check (st.finite && st.rms > 0.05 && st.peak <= 1.01 && sp && std::abs (sp->freq - 220.0) < 4.0, "saturation drives the tone into a soft limit and stays in tune (peak " + juce::String (st.peak, 2) + ")");
+        for (int type = 0; type < 6; ++type) { sat->type = type; check (renderStats ("fx-sat-" + juce::String (type), range).finite, "saturation character " + juce::String (type + 1) + " of 6 renders"); }
+        s.removeEffect (*sat);
+
+        auto* ph = dynamic_cast<PhaserPlugin*> (s.addEffect (*ft, PhaserPlugin::xmlTypeName));
+        const char* modes[] = { "phaser", "flanger", "chorus" };
+        for (int m = 0; m < 3; ++m) { ph->mode = m; auto r = renderStats (juce::String ("fx-") + modes[m], range); check (r.finite && r.rms > 0.02, juce::String (modes[m]) + " renders (rms " + juce::String (r.rms, 3) + ")"); }
+        s.removeEffect (*ph);
+
+        auto silentTail = renderStats ("fx-dry-long", longRange);
+        auto* ec = dynamic_cast<EchoPlugin*> (s.addEffect (*ft, EchoPlugin::xmlTypeName));
+        setP (ec->feedback, 0.6f); setP (ec->mix, 0.5f);
+        auto et = renderStats ("fx-echo", longRange);
+        check (et.finite && et.lastRms > 0.002 && silentTail.lastRms < 0.0005, "echo repeats keep going after the sound stops (tail rms " + juce::String (et.lastRms, 4) + ")");
+        ec->mode = 1; check (renderStats ("fx-echo-pingpong", longRange).finite, "ping-pong echo renders");
+        s.removeEffect (*ec);
+
+        auto* rv = dynamic_cast<ReverbPlugin*> (s.addEffect (*ft, ReverbPlugin::xmlTypeName));
+        setP (rv->mix, 0.5f); setP (rv->decay, 0.4f);
+        auto shortTail = renderStats ("fx-reverb-short", longRange);
+        setP (rv->decay, 8.0f);
+        auto longTail = renderStats ("fx-reverb-long", longRange);
+        check (longTail.finite && longTail.lastRms > shortTail.lastRms * 3.0 && longTail.lastRms > 0.001, "reverb decay control works (tail rms " + juce::String (shortTail.lastRms, 4) + " short, " + juce::String (longTail.lastRms, 4) + " long)");
+        s.removeEffect (*rv);
+
+        auto* vc = dynamic_cast<VocoderPlugin*> (s.addEffect (*ft, VocoderPlugin::xmlTypeName));
+        vc->bandsValue = 5; setP (vc->formant, 5.0f);
+        auto vr = renderStats ("fx-vocoder32", range);
+        check (vr.finite && vr.rms > 0.01, "vocoder with 32 bands and formant shift renders (rms " + juce::String (vr.rms, 3) + ")");
+        s.removeEffect (*vc);
+
+        auto* e1 = s.addEffect (*ft, EQPlugin::xmlTypeName);
+        auto* e2 = s.addEffect (*ft, CompressorPlugin::xmlTypeName);
+        s.moveEffect (*ft, *e2, -1);
+        check (s.effectChain (*ft).size() == 2 && s.effectChain (*ft)[0] == e2, "move an effect earlier in the chain");
+        s.removeEffect (*e1);
+        check (s.effectChain (*ft).size() == 1, "remove an effect from the chain");
+        s.deleteTrack (*ft);
+    }
+
+    // ---- instrument designer ----
+    {
+        auto* dt = s.addTrack (Kind::synth, "Designer");
+        auto* fo = s.getSynth (*dt);
+        fo->oscParams[0]->voicesValue = 4; fo->oscParams[0]->detune->setParameter (0.2f, juce::sendNotification);
+        fo->oscParams[1]->waveShapeValue = 2; fo->oscParams[1]->pulseWidth->setParameter (0.2f, juce::sendNotification);
+        fo->filterTypeValue = 1; fo->filterSlopeValue = 24;
+        fo->setModulationDepth (te::FourOscPlugin::lfo1, fo->filterFreq, 0.5f);
+        fo->setModulationDepth (te::FourOscPlugin::env1, fo->oscParams[0]->pulseWidth, -0.3f);
+        check (std::abs (fo->getModulationDepth (te::FourOscPlugin::lfo1, fo->filterFreq) - 0.5f) < 1e-3 && fo->getModulationSources (fo->filterFreq).size() == 1,
+               "route LFO 1 to the filter cutoff in the modulation matrix");
+        if (auto* mc = s.addMidiClip (*dt, {}, 1)) mc->getSequence().addNote (57, {}, te::BeatDuration::fromBeats (3), 100, 0, nullptr);
+        auto f = dir.getChildFile ("designer.wav");
+        renderTrack (s, *dt, f, { te::TimePosition(), te::TimePosition::fromSeconds (2.0) });
+        auto ds = analyse (f);
+        check (ds.finite && ds.rms > 0.01, "designed sound plays: unison, 24 dB filter, two modulation routes (rms " + juce::String (ds.rms, 3) + ")");
+        s.deleteTrack (*dt);
+    }
 
     // ---- sound to instrument ----
     auto* sam = s.makeSamplerFromClip (*getClip());
@@ -234,6 +322,12 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
         uiSession->newProject(); pump();
         std::cout << "      loading the demo song" << std::endl;
         uiSession->loadDemo(); pump();
+        for (auto* t : uiSession->tracks()) if (t->getName() == "Lead") { for (auto& e : effectSlots()) uiSession->addEffect (*t, e.type); uiSession->select (t); }
+        pump();
+        std::cout << "      effects panel showing every effect" << std::endl;
+        if (auto* t = uiSession->tracks()[1]) uiSession->select (t);
+        pump();
+        std::cout << "      instrument designer showing" << std::endl;
         uiSession->select (uiSession->tracks().getFirst()); pump();
         std::cout << "      opening a saved project" << std::endl;
         uiSession->openProject (proj); pump();

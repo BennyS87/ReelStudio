@@ -9,7 +9,7 @@ class ReelLookAndFeel : public juce::LookAndFeel_V4
 public:
     ReelLookAndFeel()
     {
-        setColourScheme ({ Col::bg, Col::panel, Col::panel2, Col::line, Col::text, Col::panel2, Col::text, Col::acc, Col::bg });
+        setColourScheme ({ Col::bg, Col::panel, Col::panel2, Col::line, Col::text, Col::panel2, juce::Colours::white, Col::acc, juce::Colours::white });
         setColour (juce::Slider::rotarySliderFillColourId, Col::acc);
         setColour (juce::Slider::rotarySliderOutlineColourId, Col::line);
         setColour (juce::Slider::thumbColourId, Col::acc);
@@ -22,6 +22,12 @@ public:
         setColour (juce::TextButton::textColourOnId, juce::Colour (0xff241800));
         setColour (juce::TextButton::textColourOffId, Col::text);
         setColour (juce::ComboBox::backgroundColourId, Col::lane);
+        setColour (juce::ComboBox::textColourId, juce::Colours::white);
+        setColour (juce::ComboBox::arrowColourId, juce::Colours::white);
+        setColour (juce::PopupMenu::textColourId, juce::Colours::white);
+        setColour (juce::PopupMenu::highlightedTextColourId, juce::Colours::white);
+        setColour (juce::PopupMenu::headerTextColourId, Col::muted);
+        setColour (juce::ToggleButton::textColourId, juce::Colours::white);
         setColour (juce::ComboBox::outlineColourId, Col::line);
         setColour (juce::ToggleButton::tickColourId, Col::acc);
         setColour (juce::Label::textColourId, Col::text);
@@ -69,6 +75,7 @@ public:
         slider.setRange (range.getStart(), range.getEnd(), 0.0);
         slider.setSkewFactor (param->valueRange.skew);
         slider.setDoubleClickReturnValue (true, param->getCurrentValue());
+        slider.setScrollWheelEnabled (false);   // the wheel scrolls the panel instead of turning knobs
         slider.setValue (param->getCurrentValue(), juce::dontSendNotification);
         slider.onDragStart = [this] { if (undo) undo->beginNewTransaction(); param->parameterChangeGestureBegin(); };
         slider.onDragEnd = [this] { param->parameterChangeGestureEnd(); };
@@ -89,11 +96,13 @@ public:
         slider.setBounds (r);
     }
     te::AutomatableParameter::Ptr param;
+    std::function<juce::String (float)> formatter;
+    void refresh() { updateText(); }
 
 private:
     void updateText()
     {
-        auto t = param->getCurrentValueAsString().replace (".000", "").replace ("00 ", " ").replace ("dB", " dB").replace ("  ", " ");
+        auto t = formatter ? formatter (param->getCurrentValue()) : param->getCurrentValueAsString().replace (".000", "").replace ("dB", " dB").replace ("  ", " ");
         value.setText (param->hasAutomationPoints() ? t + " A" : t, juce::dontSendNotification);
         value.setColour (juce::Label::textColourId, param->hasAutomationPoints() ? Col::acc : Col::text);
     }
@@ -119,6 +128,7 @@ public:
         slider.setSkewFactor (skew);
         slider.setValue (getter(), juce::dontSendNotification);
         slider.setDoubleClickReturnValue (true, def);
+        slider.setScrollWheelEnabled (false);
         slider.onValueChange = [this] { setter (slider.getValue()); refresh(); };
         name.setText (label, juce::dontSendNotification);
         for (auto* l : { &name, &value }) { l->setJustificationType (juce::Justification::centred); l->setInterceptsMouseClicks (false, false); addAndMakeVisible (*l); }
@@ -175,5 +185,62 @@ inline void styleHint (juce::Label& l)
     l.setColour (juce::Label::textColourId, Col::muted);
     l.setJustificationType (juce::Justification::topLeft);
     l.setMinimumHorizontalScale (1.0f);
+}
+
+//==============================================================================
+/** A titled, rounded section that flows its children left to right. */
+class Box : public juce::Component
+{
+public:
+    Box (juce::String t, juce::String d = {}) : title (std::move (t)), desc (std::move (d)) {}
+    template <typename T> T* add (T* c, int w, int h) { kids.add (c); c->setSize (w, h); addAndMakeVisible (c); return c; }
+    int heightFor (int w)
+    {
+        int x = 12, y = top(), lineH = 0;
+        for (auto* c : kids) { if ((x + c->getWidth() > w - 10 || breaks.count (kids.indexOf (c))) && x > 12) { x = 12; y += lineH + 6; lineH = 0; } x += c->getWidth() + 6; lineH = juce::jmax (lineH, c->getHeight()); }
+        return y + lineH + 12;
+    }
+    void resized() override
+    {
+        int x = 12, y = top(), lineH = 0;
+        for (auto* c : kids) { if ((x + c->getWidth() > getWidth() - 10 || breaks.count (kids.indexOf (c))) && x > 12) { x = 12; y += lineH + 6; lineH = 0; } c->setTopLeftPosition (x, y); x += c->getWidth() + 6; lineH = juce::jmax (lineH, c->getHeight()); }
+    }
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (0.5f);
+        g.setColour (Col::panel2); g.fillRoundedRectangle (r, 9.0f);
+        g.setColour (accent.isTransparent() ? Col::line2 : accent.withAlpha (0.6f)); g.drawRoundedRectangle (r, 9.0f, 1.0f);
+        g.setColour (dimmed ? Col::muted : Col::text); g.setFont (juce::FontOptions (17.0f, juce::Font::bold));
+        g.drawText (title, 12, 8, getWidth() - titleRightGap - 12, 20, juce::Justification::left, true);
+        if (desc.isNotEmpty()) { g.setColour (Col::muted); g.setFont (juce::FontOptions (12.5f)); g.drawFittedText (desc, 12, 30, getWidth() - 24, 32, juce::Justification::topLeft, 2); }
+    }
+    int top() const { return desc.isNotEmpty() ? 64 : 34; }
+    void breakBefore() { breaks.insert (kids.size()); }
+    juce::String title, desc; bool dimmed = false; int titleRightGap = 0; juce::Colour accent;
+    juce::OwnedArray<juce::Component> kids;
+    std::set<int> breaks;
+};
+
+inline juce::Label* captionLabel (const juce::String& s)
+{
+    auto* l = new juce::Label ({}, s); l->setColour (juce::Label::textColourId, Col::muted); l->setFont (juce::FontOptions (12.0f));
+    l->setJustificationType (juce::Justification::centredLeft); return l;
+}
+
+inline juce::TextButton* makeTextButton (const juce::String& text, std::function<void()> fn)
+{
+    auto* b = new juce::TextButton (text); b->onClick = std::move (fn); return b;
+}
+
+/** A combo box bound to an int setting. values[i] is stored for names[i]. */
+inline juce::ComboBox* makeChoiceBox (juce::CachedValue<int>& v, const juce::StringArray& names, juce::Array<int> values, juce::UndoManager* um, std::function<void()> after = nullptr)
+{
+    auto* c = new juce::ComboBox();
+    if (values.isEmpty()) for (int i = 0; i < names.size(); ++i) values.add (i);
+    for (int i = 0; i < names.size(); ++i) c->addItem (names[i], i + 1);
+    c->setSelectedId (values.indexOf (v.get()) + 1, juce::dontSendNotification);
+    auto* value = &v;
+    c->onChange = [c, value, values, um, after] { if (um) um->beginNewTransaction(); *value = values[c->getSelectedId() - 1]; if (after) after(); };
+    return c;
 }
 }

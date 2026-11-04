@@ -3,7 +3,7 @@
 
 namespace Reel
 {
-// Simple RBJ biquad used by the effects
+// Simple RBJ biquad (also used by the drum kit generator)
 struct Biquad
 {
     float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
@@ -16,208 +16,229 @@ struct Biquad
     void reset() { z1 = z2 = 0; }
 };
 
+/** Double-precision biquad used by the EQ. */
+struct BiquadD
+{
+    double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    double magnitude (double hz, double sr) const;
+};
+struct BiquadState { double z1 = 0, z2 = 0; inline double run (const BiquadD& c, double x) noexcept { const double y = c.b0 * x + z1; z1 = c.b1 * x - c.a1 * y + z2; z2 = c.b2 * x - c.a2 * y; return y; } };
+
+namespace Fmt
+{
+    juce::String pct (float v);
+    juce::String db (float v);
+    juce::String hz (float v);
+    juce::String ms (float v);
+    juce::String sec (float v);
+    juce::String ratio (float v);
+    juce::String st (float v);
+    juce::NormalisableRange<float> skewed (float lo, float hi, float centre);
+}
+
 //==============================================================================
-/** Distortion with three characters. Drive and Amount are automatable. */
-class DistortionPlugin : public te::Plugin
+/** Base for Reel's effects: every knob is an automatable, undoable, saved parameter. */
+class ReelEffect : public te::Plugin
 {
 public:
-    static const char* getPluginName() { return NEEDS_TRANS ("Distortion"); }
-    static inline const char* xmlTypeName = "reelDistortion";
-
-    DistortionPlugin (te::PluginCreationInfo info) : te::Plugin (info)
-    {
-        auto um = getUndoManager();
-        driveValue.referTo (state, "drive", um, 0.45f);
-        toneValue.referTo (state, "tone", um, 0.7f);
-        mixValue.referTo (state, "mix", um, 0.7f);
-        typeValue.referTo (state, "character", um, 0);
-        drive = addParam ("drive", TRANS ("Drive"), { 0.0f, 1.0f });
-        tone  = addParam ("tone", TRANS ("Tone"), { 0.0f, 1.0f });
-        mix   = addParam ("mix", TRANS ("Amount"), { 0.0f, 1.0f });
-        for (auto* p : { drive.get(), tone.get(), mix.get() })
-            p->valueToStringFunction = [] (float v) { return juce::String (juce::roundToInt (v * 100.0f)) + "%"; };
-        drive->attachToCurrentValue (driveValue);
-        tone->attachToCurrentValue (toneValue);
-        mix->attachToCurrentValue (mixValue);
-    }
-
-    ~DistortionPlugin() override
-    {
-        notifyListenersOfDeletion();
-        drive->detachFromCurrentValue(); tone->detachFromCurrentValue(); mix->detachFromCurrentValue();
-    }
-
-    juce::String getName() const override              { return TRANS ("Distortion"); }
-    juce::String getPluginType() override              { return xmlTypeName; }
-    juce::String getShortName (int) override           { return "Dist"; }
-    juce::String getSelectableDescription() override   { return getName(); }
-    bool needsConstantBufferSize() override            { return false; }
-
-    void initialise (const te::PluginInitialisationInfo& info) override { sampleRate = info.sampleRate; lp[0] = lp[1] = 0; }
-    void deinitialise() override {}
-    void reset() override { lp[0] = lp[1] = 0; }
-
-    void applyToBuffer (const te::PluginRenderContext& fc) override
-    {
-        if (fc.destBuffer == nullptr || ! isEnabled()) return;
-        const float d = drive->getCurrentValue(), m = mix->getCurrentValue();
-        const float g = 1.0f + std::pow (d, 1.6f) * 59.0f;
-        const float cutoff = 400.0f * std::pow (2.0f, tone->getCurrentValue() * 5.5f);
-        const float k = 1.0f - std::exp (-juce::MathConstants<float>::twoPi * cutoff / (float) sampleRate);
-        const int type = typeValue.get();
-        const int nch = juce::jmin (2, fc.destBuffer->getNumChannels());
-
-        for (int c = 0; c < nch; ++c)
-        {
-            auto* x = fc.destBuffer->getWritePointer (c, fc.bufferStartSample);
-            float z = lp[c];
-            for (int i = 0; i < fc.bufferNumSamples; ++i)
-            {
-                const float in = x[i], v = in * g;
-                float y;
-                if (type == 1)      y = v >= 0 ? 1.0f - std::exp (-v) : -(1.0f - std::exp (v * 1.6f)) * 0.8f;   // fuzz
-                else if (type == 2) y = std::round (std::tanh (v * 0.5f) * 8.0f) / 8.0f;                         // bit crush
-                else                y = std::tanh (v);                                                          // overdrive
-                z += k * (y * 0.55f - z);
-                x[i] = in * (1.0f - m) + z * m;
-            }
-            lp[c] = z;
-        }
-    }
-
-    void restorePluginStateFromValueTree (const juce::ValueTree& v) override
-    {
-        te::copyPropertiesToCachedValues (v, driveValue, toneValue, mixValue, typeValue);
-        for (auto p : getAutomatableParameters()) p->updateFromAttachedValue();
-    }
-
-    juce::CachedValue<float> driveValue, toneValue, mixValue;
-    juce::CachedValue<int> typeValue;
-    te::AutomatableParameter::Ptr drive, tone, mix;
-
-private:
+    explicit ReelEffect (te::PluginCreationInfo info) : te::Plugin (info) {}
+    ~ReelEffect() override;
+    juce::String getShortName (int) override            { return getName().substring (0, 5); }
+    juce::String getSelectableDescription() override    { return getName(); }
+    bool needsConstantBufferSize() override             { return false; }
+    void restorePluginStateFromValueTree (const juce::ValueTree&) override;
+    /** Non-automatable choice settings (type, mode, sync...). */
+    struct Choice { juce::String id, label; juce::StringArray options; juce::CachedValue<int>* value; };
+    std::vector<Choice> choices;
     double sampleRate = 44100.0;
-    float lp[2] {};
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DistortionPlugin)
+
+protected:
+    te::AutomatableParameter* addP (const juce::String& id, const juce::String& name, juce::NormalisableRange<float> range, float def, std::function<juce::String (float)> fmt);
+    void addChoice (juce::CachedValue<int>& v, const juce::String& id, const juce::String& label, juce::StringArray options, int def);
+    static float mixDry (float mix) { return juce::jmin (1.0f, 2.0f * (1.0f - mix)); }
+    static float mixWet (float mix) { return juce::jmin (1.0f, 2.0f * mix); }
+    double currentBpm() const;
+private:
+    struct P { juce::CachedValue<float> value; te::AutomatableParameter::Ptr param; };
+    std::vector<std::unique_ptr<P>> params;
+};
+
+#define REEL_EFFECT_NAMES(Type, Title) \
+    static const char* getPluginName() { return Title; } \
+    static inline const char* xmlTypeName = Type; \
+    juce::String getName() const override { return Title; } \
+    juce::String getPluginType() override { return xmlTypeName; }
+
+//==============================================================================
+class EQPlugin : public ReelEffect
+{
+public:
+    REEL_EFFECT_NAMES ("reelEQ", "EQ")
+    static constexpr int numBands = 8;
+    enum Type { lowCut, lowShelf, bell, notch, highShelf, highCut };
+    struct Band { te::AutomatableParameter *freq = nullptr, *gain = nullptr, *q = nullptr; juce::CachedValue<int> type, on, slope; };
+    explicit EQPlugin (te::PluginCreationInfo);
+    void initialise (const te::PluginInitialisationInfo&) override;
+    void deinitialise() override {}
+    void reset() override;
+    void applyToBuffer (const te::PluginRenderContext&) override;
+    double responseDb (double hz) const;                  // whole curve at current settings
+    double bandResponseDb (int band, double hz) const;
+    static BiquadD design (int type, double sr, double f, double gainDb, double q, bool firstStage);
+    int stagesFor (int band) const;
+    Band bands[numBands];
+    te::AutomatableParameter* output = nullptr;
+    // analyser: the last samples of the output, read by the editor
+    static constexpr int scopeSize = 4096;
+    float scope[scopeSize] {};
+    std::atomic<int> scopeWrite { 0 };
+private:
+    BiquadState state[2][numBands][4];
+    BiquadD coefs[numBands][4];
 };
 
 //==============================================================================
-/** Channel vocoder: the track's audio shapes a built-in synth carrier (note, chord or whisper). */
-class VocoderPlugin : public te::Plugin
+class CompressorPlugin : public ReelEffect
 {
 public:
-    static const char* getPluginName() { return NEEDS_TRANS ("Vocoder"); }
-    static inline const char* xmlTypeName = "reelVocoder";
-    static constexpr int numBands = 18;
-
-    VocoderPlugin (te::PluginCreationInfo info) : te::Plugin (info)
-    {
-        auto um = getUndoManager();
-        mixValue.referTo (state, "mix", um, 1.0f);
-        breathValue.referTo (state, "breath", um, 0.15f);
-        levelValue.referTo (state, "level", um, 0.7f);
-        noteValue.referTo (state, "note", um, 48);
-        carrierValue.referTo (state, "carrier", um, 1);
-        mix    = addParam ("mix", TRANS ("Amount"), { 0.0f, 1.0f });
-        breath = addParam ("breath", TRANS ("Breath"), { 0.0f, 1.0f });
-        level  = addParam ("level", TRANS ("Output"), { 0.0f, 1.5f });
-        for (auto* p : { mix.get(), breath.get(), level.get() })
-            p->valueToStringFunction = [] (float v) { return juce::String (juce::roundToInt (v * 100.0f)) + "%"; };
-        mix->attachToCurrentValue (mixValue); breath->attachToCurrentValue (breathValue); level->attachToCurrentValue (levelValue);
-    }
-
-    ~VocoderPlugin() override
-    {
-        notifyListenersOfDeletion();
-        mix->detachFromCurrentValue(); breath->detachFromCurrentValue(); level->detachFromCurrentValue();
-    }
-
-    juce::String getName() const override              { return TRANS ("Vocoder"); }
-    juce::String getPluginType() override              { return xmlTypeName; }
-    juce::String getShortName (int) override           { return "Voc"; }
-    juce::String getSelectableDescription() override   { return getName(); }
-    bool needsConstantBufferSize() override            { return false; }
-
-    void initialise (const te::PluginInitialisationInfo& info) override
-    {
-        sr = info.sampleRate;
-        for (int b = 0; b < numBands; ++b)
-        {
-            const double f = 110.0 * std::pow (7200.0 / 110.0, b / (double) (numBands - 1));
-            mod[b].bandpass (sr, f, 6.0); car[b].bandpass (sr, f, 6.0); mod[b].reset(); car[b].reset();
-            env[b] = 0; envGain[b] = (float) (3.2 * std::pow (f / 250.0, 0.35));
-        }
-        envCoef = (float) (1.0 - std::exp (-juce::MathConstants<double>::twoPi * 28.0 / sr));
-    }
+    REEL_EFFECT_NAMES ("reelComp", "Compressor")
+    explicit CompressorPlugin (te::PluginCreationInfo);
+    void initialise (const te::PluginInitialisationInfo&) override;
     void deinitialise() override {}
-
-    void applyToBuffer (const te::PluginRenderContext& fc) override
-    {
-        if (fc.destBuffer == nullptr || ! isEnabled()) return;
-        auto& buf = *fc.destBuffer;
-        const int nch = juce::jmin (2, buf.getNumChannels()), n = fc.bufferNumSamples, s0 = fc.bufferStartSample;
-        if (nch == 0) return;
-        const float m = mix->getCurrentValue(), noiseAmt = breath->getCurrentValue() * 0.6f, out = level->getCurrentValue() * 5.5f;
-        const int type = carrierValue.get();
-        const double base = juce::MidiMessage::getMidiNoteInHertz (juce::jlimit (12, 108, noteValue.get()));
-        const double ratios[4] = { 1.0, 1.4983, 2.0, 0.5 };
-        const float gains[4] = { type == 1 ? 0.5f : 0.8f, type == 1 ? 0.35f : 0.0f, type == 1 ? 0.3f : 0.0f, type == 1 ? 0.3f : 0.0f };
-
-        for (int i = 0; i < n; ++i)
-        {
-            float x = 0;
-            for (int c = 0; c < nch; ++c) x += buf.getSample (c, s0 + i);
-            x /= (float) nch;
-
-            float carrier = 0;
-            if (type != 2)
-                for (int o = 0; o < 4; ++o)
-                {
-                    if (gains[o] == 0) continue;
-                    const double inc = base * ratios[o] / sr;
-                    phase[o] += inc; if (phase[o] >= 1.0) phase[o] -= 1.0;
-                    carrier += gains[o] * (float) polyBlepSaw (phase[o], inc);
-                }
-            carrier += (rng.nextFloat() * 2.0f - 1.0f) * (type == 2 ? 0.7f : noiseAmt);
-
-            float y = 0;
-            for (int b = 0; b < numBands; ++b)
-            {
-                const float mb = mod[b].process (x);
-                env[b] += envCoef * (std::abs (mb) - env[b]);
-                y += car[b].process (carrier) * env[b] * envGain[b];
-            }
-            y *= out;
-            for (int c = 0; c < nch; ++c)
-            {
-                const float dry = buf.getSample (c, s0 + i);
-                buf.setSample (c, s0 + i, dry * (1.0f - m) + y * m);
-            }
-        }
-    }
-
-    void restorePluginStateFromValueTree (const juce::ValueTree& v) override
-    {
-        te::copyPropertiesToCachedValues (v, mixValue, breathValue, levelValue, noteValue, carrierValue);
-        for (auto p : getAutomatableParameters()) p->updateFromAttachedValue();
-    }
-
-    juce::CachedValue<float> mixValue, breathValue, levelValue;
-    juce::CachedValue<int> noteValue, carrierValue;   // carrier: 0 single note, 1 chord, 2 whisper
-    te::AutomatableParameter::Ptr mix, breath, level;
-
+    void reset() override { env = 0; rms = 0; hpZ[0] = hpZ[1] = 0; hpX[0] = hpX[1] = 0; }
+    void applyToBuffer (const te::PluginRenderContext&) override;
+    float curveDb (float inDb) const;                     // static transfer curve
+    float autoMakeupDb() const;
+    te::AutomatableParameter *threshold, *ratio, *knee, *attack, *release, *makeup, *mix, *scHp;
+    juce::CachedValue<int> detect, autoGain;
+    std::atomic<float> grDb { 0 }, levelDb { -100 };
 private:
-    static double polyBlepSaw (double t, double dt)
-    {
-        double v = 2.0 * t - 1.0;
-        if (t < dt)            { auto x = t / dt; v -= x + x - x * x - 1.0; }
-        else if (t > 1.0 - dt) { auto x = (t - 1.0) / dt; v -= x * x + x + x + 1.0; }
-        return v;
-    }
-    double sr = 44100.0, phase[4] {};
-    Biquad mod[numBands], car[numBands];
-    float env[numBands] {}, envGain[numBands] {}, envCoef = 0.004f;
+    float env = 0, rms = 0, hpZ[2] {}, hpX[2] {};
+};
+
+//==============================================================================
+class SaturationPlugin : public ReelEffect
+{
+public:
+    REEL_EFFECT_NAMES ("reelSat", "Saturation")
+    explicit SaturationPlugin (te::PluginCreationInfo);
+    void initialise (const te::PluginInitialisationInfo&) override;
+    void deinitialise() override {}
+    void reset() override;
+    void applyToBuffer (const te::PluginRenderContext&) override;
+    static float shape (int type, float x);
+    float curve (float x) const;                          // transfer curve at current settings, for display
+    te::AutomatableParameter *drive, *bias, *colour, *output, *mix;
+    juce::CachedValue<int> type;
+private:
+    std::unique_ptr<juce::dsp::Oversampling<float>> os;
+    juce::AudioBuffer<float> dry;
+    float tilt[2] {}, dc[2] {}, dcX[2] {}, tape[2] {};
+};
+
+//==============================================================================
+/** Distortion with oversampling and pre/post filters. */
+class DistortionPlugin : public ReelEffect
+{
+public:
+    REEL_EFFECT_NAMES ("reelDistortion", "Distortion")
+    explicit DistortionPlugin (te::PluginCreationInfo);
+    void initialise (const te::PluginInitialisationInfo&) override;
+    void deinitialise() override {}
+    void reset() override;
+    void applyToBuffer (const te::PluginRenderContext&) override;
+    static float shape (int type, float x);
+    float curve (float x) const;
+    te::AutomatableParameter *drive, *tone, *mix, *bias, *lowCut, *output;
+    juce::CachedValue<int> typeValue;
+private:
+    std::unique_ptr<juce::dsp::Oversampling<float>> os;
+    juce::AudioBuffer<float> dry;
+    float hpZ[2] {}, hpX[2] {}, lp[2] {}, dc[2] {}, dcX[2] {};
+};
+
+//==============================================================================
+class PhaserPlugin : public ReelEffect
+{
+public:
+    REEL_EFFECT_NAMES ("reelPhaser", "Phaser / Flanger / Chorus")
+    explicit PhaserPlugin (te::PluginCreationInfo);
+    void initialise (const te::PluginInitialisationInfo&) override;
+    void deinitialise() override {}
+    void reset() override;
+    void applyToBuffer (const te::PluginRenderContext&) override;
+    te::AutomatableParameter *rate, *depth, *centre, *feedback, *spread, *mix;
+    juce::CachedValue<int> mode, stages, sync;
+private:
+    double phase = 0;
+    float ap[2][12] {}, last[2] {};
+    std::vector<float> line[2];
+    int writePos = 0;
+};
+
+//==============================================================================
+class EchoPlugin : public ReelEffect
+{
+public:
+    REEL_EFFECT_NAMES ("reelEcho", "Echo")
+    explicit EchoPlugin (te::PluginCreationInfo);
+    void initialise (const te::PluginInitialisationInfo&) override;
+    void deinitialise() override {}
+    void reset() override;
+    void applyToBuffer (const te::PluginRenderContext&) override;
+    double getTailLength() const override { return 6.0; }
+    static double syncBeats (int index);
+    te::AutomatableParameter *timeL, *timeR, *feedback, *lowCut, *highCut, *wowRate, *wowDepth, *dirt, *duck, *width, *mix;
+    juce::CachedValue<int> mode, syncL, syncR, link;
+private:
+    std::vector<float> line[2];
+    int writePos = 0;
+    double wowPhase = 0, smoothL = 0, smoothR = 0;
+    float hp[2] {}, hpX[2] {}, lp[2] {}, duckEnv = 0;
+};
+
+//==============================================================================
+class ReverbPlugin : public ReelEffect
+{
+public:
+    REEL_EFFECT_NAMES ("reelReverb", "Reverb")
+    explicit ReverbPlugin (te::PluginCreationInfo);
+    void initialise (const te::PluginInitialisationInfo&) override;
+    void deinitialise() override {}
+    void reset() override;
+    void applyToBuffer (const te::PluginRenderContext&) override;
+    double getTailLength() const override { return juce::jmin (20.0, (double) decay->getCurrentValue() * 1.5); }
+    te::AutomatableParameter *preDelay, *size, *decay, *damping, *diffusion, *modulation, *early, *lowCut, *highCut, *width, *duck, *mix;
+    juce::CachedValue<int> freeze;
+private:
+    static constexpr int numLines = 8, lineSize = 32768, preSize = 65536;
+    std::vector<float> lines[numLines], pre;
+    std::vector<float> diff[4];
+    int linePos = 0, prePos = 0, diffPos[4] {}, diffLen[4] {};
+    float damp[numLines] {}, lc[2] {}, lcX[2] {}, hc[2] {}, duckEnv = 0;
+    double modPhase = 0;
+};
+
+//==============================================================================
+/** Channel vocoder: the track's audio shapes a built-in synth carrier. */
+class VocoderPlugin : public ReelEffect
+{
+public:
+    REEL_EFFECT_NAMES ("reelVocoder", "Vocoder")
+    static constexpr int maxBands = 32;
+    explicit VocoderPlugin (te::PluginCreationInfo);
+    void initialise (const te::PluginInitialisationInfo&) override;
+    void deinitialise() override {}
+    void applyToBuffer (const te::PluginRenderContext&) override;
+    te::AutomatableParameter *mix, *breath, *level, *sharpness, *attack, *release, *formant, *sibilance;
+    juce::CachedValue<int> noteValue, carrierValue, bandsValue;
+private:
+    void design (int bands, float q, float formantSt);
+    static double polyBlepSaw (double t, double dt);
+    double phase[4] {};
+    Biquad mod[maxBands], car[maxBands], sib;
+    float env[maxBands] {}, envGain[maxBands] {};
+    int designedBands = 0; float designedQ = 0, designedFormant = 999;
     juce::Random rng;
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VocoderPlugin)
 };
 }
