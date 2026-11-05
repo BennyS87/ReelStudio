@@ -257,6 +257,127 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
         s.deleteTrack (*dt);
     }
 
+    // ---- audio to MIDI ----
+    {
+        const double spb = 60.0 / s.getBpm();
+        const int tune[] = { 60, 62, 64, 65, 67, 69, 71, 72, 67, 64 };
+        auto* mt = s.addTrack (Kind::synth, "Tune");
+        s.setSynthPreset (*mt, "Sub sine");
+        if (auto* mc = s.addMidiClip (*mt, {}, 3))
+            for (int i = 0; i < 10; ++i) mc->getSequence().addNote (tune[i], te::BeatPosition::fromBeats (i), te::BeatDuration::fromBeats (0.8), 100, 0, nullptr);
+        auto mf = dir.getChildFile ("tune.wav");
+        renderTrack (s, *mt, mf, { te::TimePosition(), te::TimePosition::fromSeconds (6.0) });
+        auto found = transcribe (mf, TranscribeMode::melody);
+        int hits = 0; double worst = 0;
+        for (int i = 0; i < 10; ++i)
+            for (auto& n : found)
+                if (n.pitch == tune[i] && std::abs (n.start - i * spb) < 0.06) { ++hits; worst = juce::jmax (worst, std::abs (n.start - i * spb)); break; }
+        check (hits >= 9 && found.size() <= 12, "melody to MIDI: " + juce::String (hits) + " of 10 notes found with the right pitch, timing within "
+               + juce::String (juce::roundToInt (worst * 1000)) + " ms (" + juce::String ((int) found.size()) + " notes detected)");
+
+        auto* ct = s.addTrack (Kind::synth, "Chords");
+        s.setSynthPreset (*ct, "Organ");
+        const int chordNotes[3][3] = { { 60, 64, 67 }, { 65, 69, 72 }, { 67, 71, 74 } };
+        if (auto* mc = s.addMidiClip (*ct, {}, 3))
+            for (int c = 0; c < 3; ++c) for (int p : chordNotes[c]) mc->getSequence().addNote (p, te::BeatPosition::fromBeats (c * 4), te::BeatDuration::fromBeats (3.8), 100, 0, nullptr);
+        auto cf = dir.getChildFile ("chords.wav");
+        renderTrack (s, *ct, cf, { te::TimePosition(), te::TimePosition::fromSeconds (6.5) });
+        auto cn = transcribe (cf, TranscribeMode::chords);
+        int chordsRight = 0, extras = 0;
+        for (int c = 0; c < 3; ++c)
+        {
+            const double t0 = c * 4 * spb + 0.15, t1 = c * 4 * spb + 1.5;
+            std::set<int> got; for (auto& n : cn) if (n.start < t1 && n.start + n.length > t0) got.insert (n.pitch);
+            bool all = true; for (int p : chordNotes[c]) if (! got.count (p)) all = false;
+            if (all) ++chordsRight;
+            extras += juce::jmax (0, (int) got.size() - 3);
+        }
+        check (chordsRight >= 2, "chords to MIDI: " + juce::String (chordsRight) + " of 3 chords found note for note (" + juce::String (extras) + " extra notes)");
+
+        auto* dt2 = s.addTrack (Kind::drums, "Beat check");
+        if (auto* sc = s.addStepClip (*dt2, {}, 2))
+        {
+            auto p = sc->getPattern (0);
+            for (int i = 0; i < 16; ++i) for (int ch = 0; ch < numDrumVoices; ++ch) p.setNote (ch, i, false);
+            for (int i : { 0, 8 }) p.setNote (0, i, true);
+            for (int i : { 4, 12 }) p.setNote (1, i, true);
+            for (int i : { 2, 6, 10, 14 }) p.setNote (3, i, true);
+        }
+        auto df = dir.getChildFile ("beat.wav");
+        renderTrack (s, *dt2, df, { te::TimePosition(), s.barLength() * 2 });
+        auto dn = transcribe (df, TranscribeMode::drums);
+        auto countHits = [&] (int pitch, std::initializer_list<int> steps)
+        {
+            int ok = 0;
+            for (int bar = 0; bar < 2; ++bar) for (int st : steps)
+                for (auto& n : dn) if (n.pitch == pitch && std::abs (n.start - (bar * 16 + st) * 0.25 * spb) < 0.04) { ++ok; break; }
+            return ok;
+        };
+        const int k = countHits (36, { 0, 8 }), sn = countHits (38, { 4, 12 }), hh = countHits (42, { 2, 6, 10, 14 });
+        check (k >= 3 && sn >= 3 && hh >= 6, "drums to MIDI: kicks " + juce::String (k) + "/4, snares " + juce::String (sn) + "/4, hi-hats " + juce::String (hh) + "/8 found in the right place");
+
+        auto* srcTrack = s.addTrack (Kind::audio, "Tune audio");
+        if (auto* wc = s.importAudio (mf, srcTrack, te::TimePosition()))
+        {
+            const int before = s.tracks().size();
+            auto* made = s.convertToMidi (*wc, TranscribeMode::melody);
+            int notes = 0;
+            if (made) for (auto* c : made->getClips()) if (auto* mc = dynamic_cast<te::MidiClip*> (c)) notes += mc->getSequence().getNotes().size();
+            check (made != nullptr && s.tracks().size() == before + 1 && notes >= 9, "Turn into MIDI notes makes a new synth track with the tune (" + juce::String (notes) + " notes)");
+            if (made) s.deleteTrack (*made);
+        }
+        for (auto* t : { mt, ct, dt2, srcTrack }) s.deleteTrack (*t);
+    }
+
+    // ---- Lines sequencer ----
+    {
+        // the MPE engine on its own: a line holding C4, gliding up to G4, then holding
+        LinesPattern pat; pat.lengthBeats = 8;
+        LineData line; line.pts = { { 0.0, 60, 0.6f, 0.5f, false }, { 1.0, 60, 0.6f, 0.5f, true }, { 3.0, 67, 0.9f, 0.8f, false }, { 4.0, 67, 0.9f, 0.8f, false } };
+        pat.lines.push_back (line);
+        LinesEngine eng;
+        std::vector<std::pair<double, juce::MidiMessage>> got;
+        for (double b = 0; b < 6.0; b += 0.05) eng.process (pat, b, b + 0.05, 0.5, 4, [&] (double beat, const juce::MidiMessage& m) { got.push_back ({ beat, m }); });
+        int ons = 0, offs = 0, bendAt2 = -1, bendAt35 = -1, pressures = 0, slides = 0, ch = 0;
+        for (auto& [beat, m] : got)
+        {
+            if (m.isNoteOn()) { ++ons; ch = m.getChannel(); }
+            if (m.isNoteOff()) ++offs;
+            if (m.isPitchWheel() && beat <= 2.0) bendAt2 = m.getPitchWheelValue();
+            if (m.isPitchWheel() && beat <= 3.5) bendAt35 = m.getPitchWheelValue();
+            if (m.isChannelPressure()) ++pressures;
+            if (m.isController() && m.getControllerNumber() == 74) ++slides;
+        }
+        const int want2 = 8192 + juce::roundToInt (3.5 / 48.0 * 8192), want35 = 8192 + juce::roundToInt (7.0 / 48.0 * 8192);
+        check (ons == 1 && offs == 1 && ch >= 2 && ch <= 16, "Lines plays a line as one MPE note on its own channel (channel " + juce::String (ch) + ")");
+        check (std::abs (bendAt2 - want2) < 60 && std::abs (bendAt35 - want35) < 20, "the glide is sent as pitch bend: " + juce::String (bendAt2) + " halfway (want " + juce::String (want2) + "), " + juce::String (bendAt35) + " at the top (want " + juce::String (want35) + ")");
+        check (pressures > 3 && slides > 3, "pressure and slide curves are sent as they change (" + juce::String (pressures) + " pressure, " + juce::String (slides) + " slide messages)");
+
+        // the whole device on a synth: hear the glide and check normal clips still play
+        auto* lt = s.addTrack (Kind::synth, "Lines test");
+        s.setSynthPreset (*lt, "Sub sine");
+        auto* lp = s.addLines (*lt);
+        check (lp != nullptr && s.getSynth (*lt)->state.getProperty (te::IDs::mpe), "add Lines to a synth track (synth switched to MPE)");
+        if (lp != nullptr)
+        {
+            lp->barsChoice = 1;   // 2 bars
+            lp->addLine (line, nullptr);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+            if (auto* mc = s.addMidiClip (*lt, {}, 2)) mc->getSequence().addNote (84, te::BeatPosition::fromBeats (5), te::BeatDuration::fromBeats (1.5), 100, 0, nullptr);
+            auto lf = dir.getChildFile ("lines.wav");
+            renderTrack (s, *lt, lf, { te::TimePosition(), te::TimePosition::fromSeconds (3.5) });
+            const double spb = 60.0 / s.getBpm();
+            auto pStart = detectPitch (lf, 0.05, 0.4 * spb), pTop = detectPitch (lf, 3.1 * spb, 0.8 * spb), pClip = detectPitch (lf, 5.2 * spb, 1.0 * spb);
+            check (pStart && std::abs (pStart->freq - 261.6) < 4 && pTop && std::abs (pTop->freq - 392.0) < 5,
+                   "the drawn glide plays: " + juce::String (pStart ? pStart->freq : 0.0, 1) + " Hz at the start, " + juce::String (pTop ? pTop->freq : 0.0, 1) + " Hz after gliding up (want 261.6 and 392.0)");
+            check (pClip && std::abs (pClip->freq - 1046.5) < 12, "a normal MIDI clip on the same synth still plays through Lines (" + juce::String (pClip ? pClip->freq : 0.0, 1) + " Hz, want 1046.5)");
+            const int before = lp->lineTrees().size();
+            s.saveProject (dir.getChildFile ("lines.tracktionedit"));
+            check (before == 1, "the line is stored in the project");
+        }
+        s.deleteTrack (*lt);
+    }
+
     // ---- sound to instrument ----
     auto* sam = s.makeSamplerFromClip (*getClip());
     check (sam != nullptr && s.getSampler (*sam) != nullptr && s.getSampler (*sam)->getNumSounds() == 1, "make a playable instrument from a clip");
@@ -328,6 +449,9 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
         if (auto* t = uiSession->tracks()[1]) uiSession->select (t);
         pump();
         std::cout << "      instrument designer showing" << std::endl;
+        if (auto* t = uiSession->tracks()[1]) { if (auto* l = uiSession->addLines (*t)) { LineData d; d.pts = { { 0, 60 }, { 2, 64 } }; l->addLine (d, nullptr); } uiSession->select (t); }
+        pump();
+        std::cout << "      Lines editor showing" << std::endl;
         uiSession->select (uiSession->tracks().getFirst()); pump();
         std::cout << "      opening a saved project" << std::endl;
         uiSession->openProject (proj); pump();
@@ -340,6 +464,91 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
     }
 
     std::cout << (fails == 0 ? "ALL TESTS PASSED" : juce::String (fails) + " TEST(S) FAILED") << std::endl;
+    return fails;
+}
+
+//==============================================================================
+/** Real-time test with a running audio device (used with a virtual sound card): plays, records audio from the
+    input and records notes from the on-screen keyboard. */
+int runLiveTest (te::Engine& engine, const juce::File& dir)
+{
+    dir.createDirectory();
+    int fails = 0;
+    auto check = [&] (bool ok, const juce::String& what) { std::cout << (ok ? "PASS  " : "FAIL  ") << what << std::endl; if (! ok) ++fails; };
+    auto pump = [] (int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil (ms); };
+    auto& adm = engine.getDeviceManager().deviceManager;
+    if (adm.getCurrentDeviceTypeObject() == nullptr || adm.getCurrentDeviceTypeObject()->getTypeName() != "JACK") adm.setCurrentAudioDeviceType ("JACK", true);
+    auto setup = adm.getAudioDeviceSetup();
+    setup.inputChannels.setRange (0, 2, true); setup.outputChannels.setRange (0, 2, true);
+    setup.useDefaultInputChannels = setup.useDefaultOutputChannels = false;
+    const auto err = adm.setAudioDeviceSetup (setup, true);
+    pump (1500);
+    auto* dev = adm.getCurrentAudioDevice();
+    check (dev != nullptr, "audio device running" + (dev ? ": " + dev->getName() + " at " + juce::String (dev->getCurrentSampleRate()) + " Hz" : juce::String (", error: ") + err));
+    if (dev == nullptr) return 1;
+
+    Session s (engine);
+    s.newProject();
+    check (! s.audioInputNames().isEmpty(), "inputs available: " + s.audioInputNames().joinIntoString (", "));
+    std::cout << "LIVE READY" << std::endl;
+    pump (4000);   // the external tone source connects now
+
+    s.transport().play (false);
+    for (int i = 0; i < 60 && s.transport().getPosition().inSeconds() < 0.05; ++i) pump (50);   // wait for it to start moving
+    const double p0 = s.transport().getPosition().inSeconds(), w0 = juce::Time::getMillisecondCounterHiRes();
+    pump (1500);
+    const double speed = (s.transport().getPosition().inSeconds() - p0) / ((juce::Time::getMillisecondCounterHiRes() - w0) / 1000.0);
+    s.stop (true);
+    check (speed > 0.9 && speed < 1.1, "playback runs in real time (" + juce::String (speed, 3) + " seconds of song per second)");
+
+    auto* at = s.addTrack (Kind::audio, "Mic");
+    s.select (at); s.setCountIn (0);
+    s.toggleRecord();
+    check (s.transport().isRecording(), "recording started on the audio track");
+    pump (2500);
+    s.toggleRecord();
+    pump (2000);
+    te::WaveAudioClip* rec = nullptr;
+    for (auto* c : at->getClips()) if (auto* w = dynamic_cast<te::WaveAudioClip*> (c)) rec = w;
+    check (rec != nullptr, "recorded audio becomes a clip");
+    if (rec != nullptr)
+    {
+        auto f = rec->getSourceFileReference().getFile();
+        auto st = analyse (f);
+        auto p = detectPitch (f, 0.3, 1.0);
+        check (st.secs > 1.5 && st.rms > 0.01, "the recording has sound (" + juce::String (st.secs, 2) + " s, rms " + juce::String (st.rms, 3) + ", saved as " + f.getFileName() + ")");
+        check (p && std::abs (p->freq - 440.0) < 5.0, "the recorded test tone is 440 Hz (got " + juce::String (p ? p->freq : 0.0, 1) + ")");
+    }
+
+    auto* syn = s.addTrack (Kind::synth, "Keys");
+    s.select (syn);
+    s.seek ({});
+    s.toggleRecord();
+    pump (400);
+    for (int i = 0; i < 4; ++i) { s.keyboardNote (60 + i * 2, 0.8f, true); pump (250); s.keyboardNote (60 + i * 2, 0.0f, false); pump (150); }
+    s.toggleRecord();
+    pump (1500);
+    int recorded = 0;
+    for (auto* c : syn->getClips()) if (auto* mc = dynamic_cast<te::MidiClip*> (c)) recorded += mc->getSequence().getNotes().size();
+    check (recorded == 4, "keyboard notes recorded into a MIDI clip (" + juce::String (recorded) + " of 4)");
+
+    auto* lt = s.addTrack (Kind::synth, "Lines");
+    s.select (lt);
+    if (auto* lp = s.addLines (*lt))
+    {
+        s.seek ({});
+        lp->recording.store (true);
+        s.togglePlay();
+        pump (300);
+        for (int i = 0; i < 3; ++i) { s.keyboardNote (64 + i * 3, 0.8f, true); pump (300); s.keyboardNote (64 + i * 3, 0.0f, false); pump (150); }
+        lp->recording.store (false);
+        pump (400);
+        s.stop (true);
+        pump (300);
+        int lines = 0; for (auto& l : lp->lineTrees()) if (LinesPlugin::lineFromTree (l).pts.size() >= 2) ++lines;
+        check (lines == 3, "playing the keyboard into Lines records lines (" + juce::String (lines) + " of 3)");
+    }
+    std::cout << (fails == 0 ? "ALL LIVE TESTS PASSED" : juce::String (fails) + " LIVE TEST(S) FAILED") << std::endl;
     return fails;
 }
 }

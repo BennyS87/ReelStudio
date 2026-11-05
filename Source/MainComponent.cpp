@@ -5,7 +5,7 @@ namespace Reel
 static const char* pianoKeys = "awsedftgyhujkolp;";
 
 MainComponent::MainComponent (Session& s)
-    : session (s), arrange (s), editorPanel (s), soundPanel (s), effectsPanel (s), mixerPanel (s)
+    : session (s), arrange (s), editorPanel (s), soundPanel (s), effectsPanel (s), mixerPanel (s), linesPanel (s)
 {
     setWantsKeyboardFocus (true);
     session.addChangeListener (this);
@@ -70,6 +70,7 @@ MainComponent::MainComponent (Session& s)
     tabs.addTab ("Sound", Col::panel, &soundWrap, false);
     tabs.addTab ("Effects", Col::panel, &effectsWrap, false);
     tabs.addTab ("Mixer", Col::panel, &mixerWrap, false);
+    tabs.addTab ("Lines", Col::panel, &linesPanel, false);
     tabs.setOutline (0);
     addAndMakeVisible (tabs);
 
@@ -200,10 +201,12 @@ bool MainComponent::keyPressed (const juce::KeyPress& k)
     if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey)
     {
         if (tabs.getCurrentTabIndex() == 0 && editorPanel.deleteSelectedNotes()) return true;
+        if (tabs.getCurrentTabIndex() == 4 && linesPanel.deleteSelected()) return true;
         if (auto* c = session.getSelectedClip()) session.deleteClip (*c);
         return true;
     }
     const auto ch = (char) juce::CharacterFunctions::toLowerCase (k.getTextCharacter());
+    if (ch == 'r') { session.toggleRecord(); return true; }
     if (ch == 'b') { if (! session.splitAtPlayhead()) showMessage ("Put the playhead over a clip on the selected track, then press B to split."); return true; }
     if (ch == 'z') { octave = juce::jmax (0, octave - 1); showMessage ("Computer keys: A plays " + noteName ((octave + 1) * 12)); return true; }
     if (ch == 'x') { octave = juce::jmin (8, octave + 1); showMessage ("Computer keys: A plays " + noteName ((octave + 1) * 12)); return true; }
@@ -383,7 +386,11 @@ void MainComponent::showHelp()
         "Effects at certain points: turn an effect on in the Effects tab, press Automate, then click points in the lane under the track.\n\n"
         "Sound to instrument: right-click an audio clip and choose Make a playable instrument. Reel finds its note so it plays in tune.\n\n"
         "Drums: add a drum machine, click steps in the Editor tab, shape the drums in the Sound tab.\n\n"
-        "Record notes: select a synth, sampler or drum track, press Record and play.\n\n"
+        "Record: select an audio track and press Record (or R) to record your microphone, or select a synth, sampler or drum track to record your MIDI keyboard. "
+        "Choose the input and count-in in the Sound tab of an audio track.\n\n"
+        "Audio to MIDI: right-click an audio clip, choose Turn into MIDI notes, then Melody, Chords or Drums.\n\n"
+        "Lines: open the Lines tab on a synth, sampler or drum track and add Lines. Draw notes as lines that glide or step between pitches, "
+        "each with its own pressure and slide, played as MPE and looped with the song.\n\n"
         "Keys: Space play, Home back to start, B split, Cmd+D duplicate, Delete remove, Cmd+Z undo, A to K play notes, Z and X change octave. Pinch or Cmd-scroll zooms.");
 }
 }

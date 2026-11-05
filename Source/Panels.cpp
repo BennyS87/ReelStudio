@@ -78,9 +78,43 @@ void SoundPanel::build()
         case Kind::sampler: buildSampler (*t); break;
         case Kind::drums:   buildKit (*t); break;
         case Kind::audio:
-            hintText ("Audio tracks play recordings, so their sound is the file itself. Shape it in the Editor tab (speed, pitch, reverse, fades) "
-                      "and the Effects tab. To play this sound from a keyboard, right-click a clip and choose Make a playable instrument.", 900, 54);
+        {
+            auto id = t->itemID;
+            heading ("Recording", false);
+            add (button (session.transport().isRecording() ? "Stop recording" : "Record now (R)", [this] { session.toggleRecord(); }), 150, 30)
+                ->setColour (juce::TextButton::buttonColourId, Col::rec.withAlpha (0.35f));
+            auto* box = add (new Box ("Input", "Select this track and press Record to capture the input. Use headphones if you turn on Hear input, otherwise the speakers feed back into the microphone."), 760, 100);
+            auto inputs = session.audioInputNames();
+            if (inputs.isEmpty())
+                box->add (captionLabel ("No audio inputs found. Open Project, Audio and MIDI settings to choose a microphone or interface."), 600, 28);
+            else
+            {
+                auto* in = box->add (new juce::ComboBox(), 300, 28);
+                for (int i = 0; i < inputs.size(); ++i) in->addItem (inputs[i], i + 1);
+                const int cur = inputs.indexOf (session.getRecordInput (*t));
+                in->setSelectedId ((cur >= 0 ? cur : 0) + 1, juce::dontSendNotification);
+                in->onChange = [this, id, in] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) session.setRecordInput (*t, in->getText()); rebuildNow(); };
+                auto* hear = box->add (new juce::ToggleButton ("Hear input"), 120, 28);
+                hear->setToggleState (session.isInputMonitoring (*t), juce::dontSendNotification);
+                hear->onClick = [this, id, hear] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) session.setInputMonitoring (*t, hear->getToggleState()); };
+                box->breakBefore();
+                box->add (captionLabel ("Level"), 44, 22);
+                if (auto* m = session.inputMeasurer (*t)) box->add (new InputMeter (*m), 420, 22);
+                session.routeLiveInput();
+            }
+            box->breakBefore();
+            box->add (captionLabel ("Count-in"), 64, 28);
+            auto* ci = box->add (new juce::ComboBox(), 120, 28);
+            const char* ciNames[] = { "None", "1 bar", "2 bars", "2 beats", "1 beat" };
+            for (int i = 0; i < 5; ++i) ci->addItem (ciNames[i], i + 1);
+            ci->setSelectedId (session.getCountIn() + 1, juce::dontSendNotification);
+            ci->onChange = [this, ci] { session.setCountIn (ci->getSelectedId() - 1); };
+            box->add (captionLabel ("Turn on Click in the toolbar to hear the metronome while you record."), 420, 28);
+            hintText ("Recordings are saved as new audio files next to your project and appear as clips you can trim, stretch and reverse. "
+                      "To play a recorded sound from a keyboard, right-click its clip and choose Make a playable instrument. "
+                      "To turn a recorded melody into notes, choose Turn into MIDI notes.", 900, 54);
             break;
+        }
     }
 }
 

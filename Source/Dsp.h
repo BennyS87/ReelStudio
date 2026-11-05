@@ -13,3 +13,17 @@ namespace Reel
 
     bool writeWav (const juce::File&, const juce::AudioBuffer<float>&, double sampleRate);
 }
+
+namespace Reel
+{
+    /** A note found in a recording. Times in seconds from the start of the file. */
+    struct TranscribedNote { int pitch = 60; double start = 0, length = 0.1; int velocity = 100; };
+    enum class TranscribeMode { melody, chords, drums };
+
+    /** Finds the notes in an audio file.
+        melody: one note at a time (voice, bass, lead). Accurate pitch and timing.
+        chords: several notes at once (piano, pads, guitar chords). Best on clean recordings.
+        drums:  hits, sorted into kick, snare and hi-hat.
+        sensitivity 0..1: higher finds quieter notes. */
+    std::vector<TranscribedNote> transcribe (const juce::File&, TranscribeMode, float sensitivity = 0.5f);
+}

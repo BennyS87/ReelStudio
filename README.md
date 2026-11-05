@@ -55,7 +55,9 @@ open "build/ReelStudio_artefacts/Release/Reel Studio.app"
 | Use an effect only at certain points | Press **Automate...** on an effect and pick a setting, then click points in the lane that opens under the track. Drag points to move them; right-click removes one. A point at zero turns the effect off at that moment. |
 | Turn a sound into an instrument | Right-click an audio clip, choose **Make a playable instrument**. Reel renders that clip to a new file, finds its musical note, and creates a sampler track that plays it in tune on every key. |
 | Play notes | A MIDI keyboard connected by USB, the on-screen keyboard, or your computer keys A W S E D F T G Y H U J K (Z and X change octave). Notes go to the selected synth, sampler or drum track. |
-| Record notes | Select an instrument track, press **Record**, play, press Space to stop. |
+| Record | Select an **audio track** and press **Record** (or R) to record your microphone or audio interface. Choose the input, hear-input and count-in in that track's **Sound** tab. Select a **synth, sampler or drum track** to record your MIDI keyboard instead. Recordings are saved as new files next to your project. |
+| Draw notes as lines | Open the **Lines** tab on a synth, sampler or drum track and press **Add Lines**. Press and drag in the grid to draw a line: **Glide** makes smooth slides between pitches, **Step** makes jumps. Drag points to reshape, click a line to add a point, double-click a segment to switch glide and step, right-click to delete. The lane below edits **pressure**, **slide** and **velocity**; **Vibrato**, **Transpose**, **Quantize**, **Length** (1 to 16 bars) and **Rec** (record your keyboard as lines) are in the toolbar. Each line plays as its own MPE note, so every note bends on its own. Clips and your keyboard still play on the same synth. |
+| Turn audio into MIDI | Right-click an audio clip (or use the **Editor** tab) and choose **Turn into MIDI notes**: **Melody** for one note at a time (voice, bass, lead), **Chords** for several at once, **Drums** for kick, snare and hi-hat. The notes land on a new track you can edit and re-voice. Clean, single-instrument recordings give the best results. |
 | Import MIDI | Drop a .mid file or use **Add track**. Each part becomes a track with a sound matched to its MIDI instrument; channel 10 becomes a drum track. Edit notes in the piano roll, change the sound in the **Sound** tab. |
 | Design sounds | **Sound** tab on a synth track opens the instrument designer: 4 oscillators with unison, a 12 or 24 dB filter with its own envelope, volume envelope, 2 LFOs, 2 modulation envelopes, a modulation matrix (LFOs, envelopes, velocity, key, mod wheel or pressure to any setting), voice mode with glide, drive and chorus. Start from one of 12 sounds; **Save as my sound** keeps your version. The drum kit lets you tune, shorten, balance or replace each drum. |
 | Program drums | Select a drum clip; the **Editor** tab shows the step grid. Click a step for on, again for accent, again to clear. |
@@ -82,6 +84,8 @@ Keyboard: Space play or pause, Home back to start, B split, Cmd+D duplicate, Del
 | `Source/Dsp.*` | Drum kit synthesis and pitch detection. |
 | `Source/ArrangeView.*` | The timeline: tracks, clips, ruler, loop range, automation lanes. |
 | `Source/Editors.*` | Piano roll, step grid and the audio clip editor. |
+| `Source/LinesPlugin.*` | The Lines sequencer: line data, the MPE note engine, recording. |
+| `Source/LinesEditor.*` | The Lines tab: drawing canvas, expression lane, toolbar. |
 | `Source/Panels.*` | Instrument designer, effect chain and mixer tabs. |
 | `Source/MainComponent.*`, `Source/Main.cpp` | Window, toolbar, keyboard shortcuts and app start-up. |
 | `Source/SelfTest.cpp` | The automated checks. |

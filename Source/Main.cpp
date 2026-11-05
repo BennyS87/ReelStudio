@@ -1,7 +1,7 @@
 #include "MainComponent.h"
 #include <iostream>
 
-namespace Reel { int runSelfTest (te::Engine&, const juce::File&); }
+namespace Reel { int runSelfTest (te::Engine&, const juce::File&); int runLiveTest (te::Engine&, const juce::File&); }
 
 class ReelApplication : public juce::JUCEApplication
 {
@@ -21,8 +21,16 @@ public:
         engine->getPluginManager().createBuiltInType<Reel::PhaserPlugin>();
         engine->getPluginManager().createBuiltInType<Reel::EchoPlugin>();
         engine->getPluginManager().createBuiltInType<Reel::ReverbPlugin>();
+        engine->getPluginManager().createBuiltInType<Reel::LinesPlugin>();
 
         auto args = juce::StringArray::fromTokens (commandLine, true);
+        if (args.contains ("--livetest"))
+        {
+            const int fails = Reel::runLiveTest (*engine, juce::File::getCurrentWorkingDirectory().getChildFile ("livetest"));
+            setApplicationReturnValue (fails == 0 ? 0 : 1);
+            quit();
+            return;
+        }
         if (args.contains ("--selftest"))
         {
             const auto i = args.indexOf ("--selftest");

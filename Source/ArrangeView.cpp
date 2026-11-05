@@ -175,6 +175,7 @@ void ArrangeView::paintHeader (juce::Graphics& g, const Row& r)
     if (getKind (t) == Kind::sampler) sub << ": " << t.state.getProperty (IDs::sampleName, "no sound yet").toString();
     int fx = 0; for (auto* p : session.effectChain (t)) if (p->isEnabled()) ++fx;
     if (fx) sub << ", " << fx << (fx == 1 ? " effect" : " effects");
+    if (session.getLines (t) != nullptr) sub << ", Lines";
     g.setColour (Col::muted); g.setFont (juce::FontOptions (12.5f));
     g.drawText (sub, 14, r.y + 28, headerW - 22, 16, juce::Justification::left, true);
 
@@ -602,7 +603,16 @@ void ArrangeView::showClipMenu (te::Clip& c)
     juce::PopupMenu m;
     auto* w = dynamic_cast<te::WaveAudioClip*> (&c);
     m.addItem (1, w ? "Speed, pitch and fades" : dynamic_cast<te::StepClip*> (&c) ? "Edit steps" : "Edit notes");
-    if (w) { m.addItem (4, w->getIsReversed() ? "Play forwards again" : "Reverse"); m.addItem (5, "Make a playable instrument from this sound"); }
+    if (w)
+    {
+        m.addItem (4, w->getIsReversed() ? "Play forwards again" : "Reverse");
+        m.addItem (5, "Make a playable instrument from this sound");
+        juce::PopupMenu tm;
+        tm.addItem (8, "Melody (one note at a time: voice, bass, lead)");
+        tm.addItem (9, "Chords (several notes at once)");
+        tm.addItem (10, "Drums (kick, snare, hi-hat)");
+        m.addSubMenu ("Turn into MIDI notes", tm);
+    }
     m.addSeparator();
     m.addItem (2, "Split at playhead (B)"); m.addItem (3, "Duplicate (Cmd+D)"); m.addItem (6, "Loop this clip");
     m.addSeparator(); m.addItem (7, "Delete clip");
@@ -620,6 +630,9 @@ void ArrangeView::showClipMenu (te::Clip& c)
             case 5: if (w) session.makeSamplerFromClip (*w); break;
             case 6: session.loopClip (*c); break;
             case 7: session.deleteClip (*c); break;
+            case 8: case 9: case 10:
+                if (w) session.convertToMidi (*w, r == 8 ? TranscribeMode::melody : r == 9 ? TranscribeMode::chords : TranscribeMode::drums);
+                break;
             default: break;
         }
         repaint();

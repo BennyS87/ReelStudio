@@ -436,6 +436,18 @@ void EditorPanel::rebuild()
         makeButton (C, "Duplicate", [this, get] { if (auto* c = get()) session.duplicateClip (*c); });
         makeButton (C, "Loop this clip", [this, get] { if (auto* c = get()) session.loopClip (*c); });
         auto* mk = makeButton (C, "Make a playable instrument", [this, get] { if (auto* w = dynamic_cast<te::WaveAudioClip*> (get())) session.makeSamplerFromClip (*w); });
+        makeButton (C, "Turn into MIDI notes...", [this, get]
+        {
+            juce::PopupMenu m;
+            m.addItem (1, "Melody (one note at a time: voice, bass, lead)");
+            m.addItem (2, "Chords (several notes at once)");
+            m.addItem (3, "Drums (kick, snare, hi-hat)");
+            m.showMenuAsync (juce::PopupMenu::Options(), [this, get] (int r)
+            {
+                if (auto* w = dynamic_cast<te::WaveAudioClip*> (get()); w != nullptr && r > 0)
+                    session.convertToMidi (*w, r == 1 ? TranscribeMode::melody : r == 2 ? TranscribeMode::chords : TranscribeMode::drums);
+            });
+        });
         mk->setColour (juce::TextButton::buttonColourId, Col::acc.withAlpha (0.25f));
         makeButton (C, "Delete clip", [this, get] { if (auto* c = get()) session.deleteClip (*c); });
         hint.setText ("Drag a clip's edges on the timeline to trim it. Trimming hides audio; it never deletes it. "

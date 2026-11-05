@@ -173,6 +173,30 @@ private:
     te::LevelMeasurer::Client client; float level = 0;
 };
 
+/** Input level meter for a recording device (devices live as long as the engine). */
+class InputMeter : public juce::Component, private juce::Timer
+{
+public:
+    explicit InputMeter (te::LevelMeasurer& m) : measurer (m) { measurer.addClient (client); startTimerHz (30); }
+    ~InputMeter() override { measurer.removeClient (client); }
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        g.setColour (Col::lane); g.fillRoundedRectangle (r, 4.0f);
+        juce::ColourGradient grad (Col::ok, r.getX(), 0, Col::rec, r.getRight(), 0, false); grad.addColour (0.75, Col::acc);
+        g.setGradientFill (grad); g.fillRoundedRectangle (r.withWidth (r.getWidth() * level), 4.0f);
+        g.setColour (Col::text); g.setFont (juce::FontOptions (11.0f)); g.drawText (peakDb > -90 ? juce::String (peakDb, 1) + " dB" : juce::String ("silent"), r.reduced (6, 0), juce::Justification::centredRight);
+    }
+private:
+    void timerCallback() override
+    {
+        float db = -100.0f; for (int c = 0; c < 2; ++c) db = juce::jmax (db, client.getAndClearAudioLevel (c).dB);
+        level = juce::jmax (juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f), level - 0.03f);
+        peakDb = juce::jmax (db, peakDb - 0.5f); repaint();
+    }
+    te::LevelMeasurer& measurer; te::LevelMeasurer::Client client; float level = 0, peakDb = -100.0f;
+};
+
 inline void styleHeading (juce::Label& l, float size = 17.0f)
 {
     l.setFont (juce::FontOptions (size, juce::Font::bold));

@@ -28,7 +28,7 @@ namespace Reel
     {
         inline const juce::Identifier kind { "reelKind" }, preset { "reelPreset" }, kitTune { "reelKitTune" },
                                       kitLen { "reelKitLen" }, kitLevel { "reelKitLevel" }, autoParam { "reelAutoParam" },
-                                      autoShown { "reelAutoShown" }, sampleName { "reelSampleName" }, samplePath { "reelSamplePath" };
+                                      autoShown { "reelAutoShown" }, sampleName { "reelSampleName" }, samplePath { "reelSamplePath" }, recordInput { "reelRecordInput" };
     }
 
     inline Kind getKind (const te::Track& t)

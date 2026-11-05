@@ -128,6 +128,7 @@ Session::Session (te::Engine& e) : engine (e)
     autosaveFile = appDataDir().getChildFile ("Autosave.tracktionedit");
     if (keyboardDevice() == nullptr)
         engine.getDeviceManager().createVirtualMidiDevice ("Reel keyboard");
+    prepareAudioInputs();
     newProject();
     startTimer (15000);
 }
@@ -487,10 +488,8 @@ te::AudioTrack* Session::makeSamplerFromClip (te::WaveAudioClip& c)
 {
     auto* src = dynamic_cast<te::AudioTrack*> (c.getTrack());
     if (src == nullptr) return nullptr;
-    auto file = samplesDir().getNonexistentChildFile (juce::File::createLegalFileName (c.getName().isEmpty() ? "Sound" : c.getName()), ".wav", false);
-    juce::BigInteger trackBits; trackBits.setBit (te::getAllTracks (*edit).indexOf (src));
-    const bool ok = te::Renderer::renderToFile ("Make instrument", file, *edit, c.getEditTimeRange(), trackBits, false, false, { &c }, false);
-    if (! ok || ! file.existsAsFile()) { if (onMessage) onMessage ("Could not prepare that sound."); return nullptr; }
+    auto file = renderClip (c, samplesDir().getNonexistentChildFile (juce::File::createLegalFileName (c.getName().isEmpty() ? "Sound" : c.getName()), ".wav", false));
+    if (file == juce::File()) { if (onMessage) onMessage ("Could not prepare that sound."); return nullptr; }
     beginAction();
     auto* t = addTrack (Kind::sampler, (c.getName().isEmpty() ? juce::String ("Sound") : c.getName()).substring (0, 30) + " keys");
     loadSamplerSound (*t, file, true);
@@ -598,7 +597,28 @@ void Session::auditionDrum (te::AudioTrack& t, int voice)
 static bool isEffectPlugin (te::Plugin* p)
 {
     return p != nullptr && ! p->isSynth() && dynamic_cast<te::VolumeAndPanPlugin*> (p) == nullptr && dynamic_cast<te::LevelMeterPlugin*> (p) == nullptr
-        && dynamic_cast<te::SamplerPlugin*> (p) == nullptr && dynamic_cast<te::FourOscPlugin*> (p) == nullptr;
+        && dynamic_cast<te::SamplerPlugin*> (p) == nullptr && dynamic_cast<te::FourOscPlugin*> (p) == nullptr && dynamic_cast<LinesPlugin*> (p) == nullptr;
+}
+
+LinesPlugin* Session::getLines (te::AudioTrack& t) const { return t.pluginList.findFirstPluginOfType<LinesPlugin>(); }
+
+LinesPlugin* Session::addLines (te::AudioTrack& t)
+{
+    if (auto* l = getLines (t)) return l;
+    auto p = edit->getPluginCache().createNewPlugin (LinesPlugin::xmlTypeName, {});
+    if (p == nullptr) return nullptr;
+    t.pluginList.insertPlugin (p, 0, nullptr);   // before the instrument, so it feeds it
+    if (auto* s = getSynth (t)) s->state.setProperty (te::IDs::mpe, true, &undoManager());   // each line bends on its own
+    return dynamic_cast<LinesPlugin*> (p.get());
+}
+
+void Session::removeLines (te::AudioTrack& t)
+{
+    if (auto* l = getLines (t))
+    {
+        l->deleteFromParent();
+        if (auto* s = getSynth (t)) s->state.setProperty (te::IDs::mpe, false, &undoManager());
+    }
 }
 
 juce::Array<te::Plugin*> Session::effectChain (te::AudioTrack& t) const
@@ -713,18 +733,33 @@ void Session::stop (bool rewind)
     if (rewind) tr.setPosition (tr.looping ? tr.getLoopRange().getStart() : te::TimePosition());
 }
 
+void Session::disarmAll()
+{
+    for (auto* inst : edit->getAllInputDevices()) for (auto* tt : tracks()) inst->setRecordingEnabled (tt->itemID, false);
+}
+
 void Session::toggleRecord()
 {
     auto& tr = transport();
+    if (tr.isRecording()) { tr.stop (false, false); disarmAll(); return; }
     auto* t = getSelectedTrack();
-    if (tr.isRecording())
+    if (t == nullptr)
     {
-        tr.stop (false, false);
-        for (auto* inst : edit->getAllInputDevices()) for (auto* tt : tracks()) inst->setRecordingEnabled (tt->itemID, false);
+        if (onMessage) onMessage ("Select a track first. An audio track records your microphone; a synth, sampler or drum track records your MIDI keyboard.");
         return;
     }
-    if (! isInstrument (t)) { if (onMessage) onMessage ("Select a synth, sampler or drum track, then press record to capture what you play."); return; }
+    if (getKind (*t) == Kind::audio)
+    {
+        auto* inst = routeAudioInput (*t);
+        if (inst == nullptr) { if (onMessage) onMessage ("No microphone or audio input was found. Check Project, Audio and MIDI settings."); return; }
+        disarmAll();
+        inst->setRecordingEnabled (t->itemID, true);
+        tr.record (false);
+        if (onMessage) onMessage ("Recording " + inst->getInputDevice().getName() + " onto " + t->getName() + ". Press Space or Record to stop.");
+        return;
+    }
     routeLiveInput();
+    disarmAll();
     for (auto* inst : edit->getAllInputDevices())
     {
         const auto type = inst->getInputDevice().getDeviceType();
@@ -733,6 +768,121 @@ void Session::toggleRecord()
     }
     tr.record (false);
     if (onMessage) onMessage ("Recording onto " + t->getName() + ". Play your keyboard, then press Space to stop.");
+}
+
+void Session::prepareAudioInputs()
+{
+    auto& dm = engine.getDeviceManager();
+    for (int i = 0; i < dm.getNumWaveInDevices(); ++i)
+        if (auto* w = dm.getWaveInDevice (i))
+        {
+            w->setEnabled (true);
+            if (w->getMonitorMode() != te::InputDevice::MonitorMode::on) w->setMonitorMode (te::InputDevice::MonitorMode::off);   // no feedback through laptop speakers by default
+        }
+}
+
+juce::StringArray Session::audioInputNames() const
+{
+    juce::StringArray s;
+    auto& dm = engine.getDeviceManager();
+    for (int i = 0; i < dm.getNumWaveInDevices(); ++i) if (auto* w = dm.getWaveInDevice (i)) if (w->isEnabled()) s.add (w->getName());
+    return s;
+}
+
+juce::String Session::getRecordInput (te::AudioTrack& t) const { return t.state.getProperty (IDs::recordInput).toString(); }
+void Session::setRecordInput (te::AudioTrack& t, const juce::String& n) { t.state.setProperty (IDs::recordInput, n, nullptr); routeAudioInput (t); }
+
+te::WaveInputDevice* Session::waveDeviceFor (te::AudioTrack& t) const
+{
+    auto& dm = engine.getDeviceManager();
+    const auto wanted = getRecordInput (t);
+    te::WaveInputDevice* first = nullptr;
+    for (int i = 0; i < dm.getNumWaveInDevices(); ++i)
+        if (auto* w = dm.getWaveInDevice (i); w != nullptr && w->isEnabled())
+        {
+            if (first == nullptr) first = w;
+            if (w->getName() == wanted) return w;
+        }
+    return first;
+}
+
+te::InputDeviceInstance* Session::routeAudioInput (te::AudioTrack& t)
+{
+    prepareAudioInputs();
+    edit->getTransport().ensureContextAllocated();
+    auto* dev = waveDeviceFor (t);
+    if (dev == nullptr) return nullptr;
+    for (auto* inst : edit->getAllInputDevices())
+        if (&inst->getInputDevice() == dev)
+        {
+            [[maybe_unused]] auto r = inst->setTarget (t.itemID, true, nullptr, 0);
+            edit->restartPlayback();
+            return inst;
+        }
+    return nullptr;
+}
+
+bool Session::isInputMonitoring (te::AudioTrack& t) const
+{
+    auto* d = waveDeviceFor (t); return d != nullptr && d->getMonitorMode() == te::InputDevice::MonitorMode::on;
+}
+
+void Session::setInputMonitoring (te::AudioTrack& t, bool on)
+{
+    if (auto* d = waveDeviceFor (t)) { d->setMonitorMode (on ? te::InputDevice::MonitorMode::on : te::InputDevice::MonitorMode::off); routeAudioInput (t); }
+}
+
+te::LevelMeasurer* Session::inputMeasurer (te::AudioTrack& t) const { if (auto* d = waveDeviceFor (t)) return &d->levelMeasurer; return nullptr; }
+int Session::getCountIn() const { return (int) edit->getCountInMode(); }
+void Session::setCountIn (int v) { edit->setCountInMode ((te::Edit::CountIn) juce::jlimit (0, 4, v)); }
+
+juce::File Session::renderClip (te::WaveAudioClip& c, const juce::File& file)
+{
+    auto* src = dynamic_cast<te::AudioTrack*> (c.getTrack());
+    if (src == nullptr) return {};
+    juce::BigInteger trackBits; trackBits.setBit (te::getAllTracks (*edit).indexOf (src));
+    file.deleteFile();
+    const bool ok = te::Renderer::renderToFile ("Render clip", file, *edit, c.getEditTimeRange(), trackBits, false, false, { &c }, false);
+    return ok && file.existsAsFile() ? file : juce::File();
+}
+
+te::AudioTrack* Session::convertToMidi (te::WaveAudioClip& c, TranscribeMode mode, float sensitivity)
+{
+    auto file = renderClip (c, appDataDir().getChildFile ("Analysis").getChildFile ("clip.wav"));
+    if (file == juce::File()) { if (onMessage) onMessage ("Could not read that clip."); return nullptr; }
+    auto notes = transcribe (file, mode, sensitivity);
+    if (notes.empty())
+    {
+        if (onMessage) onMessage (mode == TranscribeMode::drums ? "No drum hits were found in that clip." : "No clear notes were found. Try another mode, or a cleaner recording.");
+        return nullptr;
+    }
+    beginAction();
+    auto* src = dynamic_cast<te::AudioTrack*> (c.getTrack());
+    const auto clipName = c.getName().isEmpty() ? juce::String ("Audio") : c.getName();
+    auto* t = addTrack (mode == TranscribeMode::drums ? Kind::drums : Kind::synth, (clipName + " notes").substring (0, 40));
+    if (mode != TranscribeMode::drums)
+    {
+        std::vector<int> ps; for (auto& n : notes) ps.push_back (n.pitch);
+        std::sort (ps.begin(), ps.end());
+        setSynthPreset (*t, mode == TranscribeMode::chords ? "Electric piano" : ps[ps.size() / 2] < 48 ? "Round bass" : "Soft keys");
+    }
+    const auto start = c.getPosition().getStart();
+    double endSec = c.getPosition().getLength().inSeconds();
+    for (auto& n : notes) endSec = juce::jmax (endSec, n.start + n.length);
+    auto mc = t->insertMIDIClip ({ start, start + te::TimeDuration::fromSeconds (endSec) }, nullptr);
+    if (mc == nullptr) return t;
+    mc->setName (clipName + " notes");
+    const double b0 = toBeats (start).inBeats();
+    for (auto& n : notes)
+    {
+        const double sb = toBeats (start + te::TimeDuration::fromSeconds (n.start)).inBeats() - b0;
+        const double eb = toBeats (start + te::TimeDuration::fromSeconds (n.start + n.length)).inBeats() - b0;
+        mc->getSequence().addNote (n.pitch, te::BeatPosition::fromBeats (sb), te::BeatDuration::fromBeats (juce::jmax (1.0 / 32.0, eb - sb)), n.velocity, 0, &undoManager());
+    }
+    if (src != nullptr) moveTrack (*t, tracks().indexOf (src) + 1 - tracks().indexOf (t));
+    select (t, mc.get());
+    if (onMessage) onMessage ("Found " + juce::String ((int) notes.size()) + (notes.size() == 1 ? " note" : " notes") + ". They're on the new track " + t->getName() + "; change their sound in the Sound tab.");
+    return t;
 }
 
 void Session::seek (te::TimePosition t) { transport().setPosition (juce::jmax (te::TimePosition(), t)); }

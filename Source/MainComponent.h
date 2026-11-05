@@ -2,6 +2,7 @@
 #include "ArrangeView.h"
 #include "Editors.h"
 #include "Panels.h"
+#include "LinesEditor.h"
 
 namespace Reel
 {
@@ -67,7 +68,7 @@ private:
     ArrangeView arrange;
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     EditorPanel editorPanel;
-    SoundPanel soundPanel; EffectsPanel effectsPanel; MixerPanel mixerPanel;
+    SoundPanel soundPanel; EffectsPanel effectsPanel; MixerPanel mixerPanel; LinesPanel linesPanel;
     ScrollWrap soundWrap { soundPanel }, effectsWrap { effectsPanel }, mixerWrap { mixerPanel, true };
     juce::MidiKeyboardState keyboardState;
     juce::MidiKeyboardComponent keyboard { keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard };

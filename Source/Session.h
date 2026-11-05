@@ -2,6 +2,7 @@
 #include "Common.h"
 #include "ReelPlugins.h"
 #include "Dsp.h"
+#include "LinesPlugin.h"
 
 namespace Reel
 {
@@ -90,6 +91,11 @@ public:
     void applyKit (te::AudioTrack&);
     void auditionDrum (te::AudioTrack&, int voice);
 
+    // ---- Lines sequencer ----
+    LinesPlugin* getLines (te::AudioTrack&) const;
+    LinesPlugin* addLines (te::AudioTrack&);
+    void removeLines (te::AudioTrack&);
+
     // ---- effects ----
     juce::Array<te::Plugin*> effectChain (te::AudioTrack&) const;          // in processing order
     te::Plugin* addEffect (te::AudioTrack&, const juce::String& type);      // appended to the end of the chain
@@ -125,6 +131,20 @@ public:
     void keyboardNote (int note, float velocity, bool isOn);
     juce::StringArray midiInputNames() const;
 
+    // ---- recording ----
+    juce::StringArray audioInputNames() const;
+    juce::String getRecordInput (te::AudioTrack&) const;          // empty = the first input
+    void setRecordInput (te::AudioTrack&, const juce::String& deviceName);
+    bool isInputMonitoring (te::AudioTrack&) const;
+    void setInputMonitoring (te::AudioTrack&, bool);
+    te::LevelMeasurer* inputMeasurer (te::AudioTrack&) const;
+    int getCountIn() const;                                        // te::Edit::CountIn value
+    void setCountIn (int);
+    void prepareAudioInputs();
+
+    // ---- audio to MIDI ----
+    te::AudioTrack* convertToMidi (te::WaveAudioClip&, TranscribeMode, float sensitivity = 0.5f);
+
     // ---- export ----
     bool exportMix (const juce::File&);
 
@@ -143,6 +163,10 @@ private:
     void handleAsyncUpdate() override { dirty = true; sendChangeMessage(); }
     void timerCallback() override;
     std::shared_ptr<te::VirtualMidiInputDevice> keyboardDevice() const;
+    te::WaveInputDevice* waveDeviceFor (te::AudioTrack&) const;
+    te::InputDeviceInstance* routeAudioInput (te::AudioTrack&);
+    void disarmAll();
+    juce::File renderClip (te::WaveAudioClip&, const juce::File&);
     bool dirty = false;
     juce::File autosaveFile;
 };
