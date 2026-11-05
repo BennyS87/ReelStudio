@@ -282,11 +282,24 @@ void MainComponent::showAddMenu()
     m.addItem (2, "Synth (built-in sounds)");
     m.addItem (3, "Sampler (play any sound on keys)");
     m.addItem (4, "Drum machine with step sequencer");
+    auto mine = session.myInstrumentNames();
+    if (! mine.isEmpty())
+    {
+        juce::PopupMenu im;
+        for (int i = 0; i < mine.size(); ++i) im.addItem (100 + i, mine[i]);
+        m.addSubMenu ("My instrument", im);
+    }
     m.addSeparator();
     m.addItem (5, "Import a MIDI file...");
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (bAdd), [this] (int r)
     {
         if (r == 1) { browseForAudio (nullptr, std::nullopt); return; }
+        if (r >= 100)
+        {
+            auto mine = session.myInstrumentNames();
+            if (r - 100 < mine.size()) { session.beginAction(); if (auto* t = session.addInstrumentTrack (mine[r - 100])) { session.select (t, session.addMidiClip (*t, session.snapToBar (session.transport().getPosition()), 2)); tabs.setCurrentTabIndex (1); } }
+            return;
+        }
         if (r == 5)
         {
             chooser = std::make_unique<juce::FileChooser> ("Import a MIDI file", juce::File(), "*.mid;*.midi");
@@ -389,6 +402,9 @@ void MainComponent::showHelp()
         "Record: select an audio track and press Record (or R) to record your microphone, or select a synth, sampler or drum track to record your MIDI keyboard. "
         "Choose the input and count-in in the Sound tab of an audio track.\n\n"
         "Audio to MIDI: right-click an audio clip, choose Turn into MIDI notes, then Melody, Chords or Drums.\n\n"
+        "Instruments: right-click an audio clip and choose Save this sound as an instrument, or press Save as instrument on a sampler track. "
+        "Use it on any synth or sampler track from the instrument list in the Sound tab, or from Add track, My instrument.\n\n"
+        "Lines on recordings: select an audio track and open the Lines tab to turn the recording into lines, or to play lines with its sound.\n\n"
         "Lines: open the Lines tab on a synth, sampler or drum track and add Lines. Draw notes as lines that glide or step between pitches, "
         "each with its own pressure and slide, played as MPE and looped with the song.\n\n"
         "Keys: Space play, Home back to start, B split, Cmd+D duplicate, Delete remove, Cmd+Z undo, A to K play notes, Z and X change octave. Pinch or Cmd-scroll zooms.");

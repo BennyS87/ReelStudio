@@ -196,7 +196,9 @@ namespace
         return true;
     }
 
-    std::vector<TranscribedNote> melody (const std::vector<float>& x, double sr, float sens)
+    struct PitchFrames { std::vector<float> med, rms; float maxRms = 0, gate = 0; int hop = 256; };
+
+    PitchFrames pitchFrames (const std::vector<float>& x, double sr, float sens)
     {
         constexpr int W = 2048, half = W / 2, order = 12, N = 1 << order;   // 4096-point FFT for fast YIN
         const int hop = juce::jmax (64, (int) (sr * 0.0058));
@@ -247,6 +249,17 @@ namespace
             std::vector<float> w; for (int k = -2; k <= 2; ++k) if (midi[(size_t) (i + k)] > 0) w.push_back (midi[(size_t) (i + k)]);
             if (midi[(size_t) i] > 0 && w.size() >= 3) { std::sort (w.begin(), w.end()); med[(size_t) i] = w[w.size() / 2]; }
         }
+        PitchFrames pf; pf.med = std::move (med); pf.rms = std::move (rms); pf.maxRms = maxRms; pf.gate = gate; pf.hop = hop;
+        return pf;
+    }
+
+    std::vector<TranscribedNote> melody (const std::vector<float>& x, double sr, float sens)
+    {
+        constexpr int W = 2048;
+        auto pf = pitchFrames (x, sr, sens);
+        auto& med = pf.med; auto& rms = pf.rms;
+        const float maxRms = pf.maxRms, gate = pf.gate;
+        const int hop = pf.hop, frames = (int) med.size();
         std::vector<TranscribedNote> notes;
         const double frameSec = hop / sr, offset = (W * 0.25) / sr;
         const int minFrames = juce::jmax (3, (int) (0.045 / frameSec));
@@ -416,6 +429,62 @@ namespace
         }
         return notes;
     }
+}
+
+std::vector<ContourLine> transcribeContour (const juce::File& f, float sens)
+{
+    std::vector<float> x; double sr = 44100;
+    if (! loadMono (f, x, sr)) return {};
+    auto pf = pitchFrames (x, sr, juce::jlimit (0.0f, 1.0f, sens));
+    const int frames = (int) pf.med.size();
+    const double frameSec = pf.hop / sr, offset = (2048 * 0.25) / sr;
+    std::vector<ContourLine> out;
+    int start = -1, quiet = 0;
+    auto finish = [&] (int end)
+    {
+        if (start >= 0 && (end - start) * frameSec >= 0.06)
+        {
+            // simplify the pitch curve: keep only the points needed to stay within a fifth of a semitone
+            std::vector<int> keep { start, end - 1 };
+            std::function<void (int, int)> rdp = [&] (int a, int b)
+            {
+                float worst = 0; int at = -1;
+                for (int i = a + 1; i < b; ++i)
+                {
+                    const float lin = pf.med[(size_t) a] + (pf.med[(size_t) b] - pf.med[(size_t) a]) * (float) (i - a) / (float) (b - a);
+                    const float d = std::abs (pf.med[(size_t) i] - lin);
+                    if (d > worst) { worst = d; at = i; }
+                }
+                if (at >= 0 && worst > 0.2f) { keep.push_back (at); rdp (a, at); rdp (at, b); }
+            };
+            rdp (start, end - 1);
+            std::sort (keep.begin(), keep.end());
+            ContourLine line; float peak = 0;
+            for (int i = start; i < end; ++i) peak = juce::jmax (peak, pf.rms[(size_t) i]);
+            line.velocity = juce::jlimit (30, 127, juce::roundToInt (40 + 87 * std::sqrt (peak / pf.maxRms)));
+            for (int i : keep)
+            {
+                float level = 0; int n = 0;   // loudness around the point becomes pressure
+                for (int k = juce::jmax (start, i - 3); k <= juce::jmin (end - 1, i + 3); ++k) { level += pf.rms[(size_t) k]; ++n; }
+                line.points.push_back ({ i * frameSec + offset, pf.med[(size_t) i], juce::jlimit (0.05f, 1.0f, std::sqrt (level / n / peak)) });
+            }
+            if (line.points.size() == 1) { auto p = line.points.front(); p.time += frameSec; line.points.push_back (p); }
+            out.push_back (std::move (line));
+        }
+        start = -1;
+    };
+    for (int i = 0; i < frames; ++i)
+    {
+        const bool voiced = pf.med[(size_t) i] > 0 && pf.rms[(size_t) i] > pf.gate;
+        const bool attack = i >= 3 && pf.rms[(size_t) i] > pf.gate * 2 && pf.rms[(size_t) i] > pf.rms[(size_t) (i - 3)] * 1.8f;
+        if (! voiced) { if (start >= 0 && ++quiet >= 4) finish (i - quiet + 1); continue; }
+        quiet = 0;
+        if (start >= 0 && attack && (i - start) * frameSec > 0.08) finish (i);
+        if (start >= 0 && std::abs (pf.med[(size_t) i] - pf.med[(size_t) juce::jmax (start, i - 1)]) > 4.0f) finish (i);   // a leap, not a slide
+        if (start < 0) start = i;
+    }
+    finish (frames);
+    return out;
 }
 
 std::vector<TranscribedNote> transcribe (const juce::File& f, TranscribeMode mode, float sensitivity)

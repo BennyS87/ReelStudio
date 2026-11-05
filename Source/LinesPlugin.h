@@ -21,7 +21,8 @@ struct LinesPattern
 {
     double lengthBeats = 16;
     float transpose = 0, bendRange = 48;
-    bool bipolarSlide = false;
+    bool bipolarSlide = false, once = false;   // once: play the pattern a single time, starting at offset
+    double offset = 0;                        // beats into the song where the pattern starts
     std::vector<LineData> lines;
 };
 
@@ -72,9 +73,11 @@ public:
     juce::Array<juce::ValueTree> lineTrees() const;
     std::shared_ptr<const LinesPattern> snapshot() const;
     double lengthBeats() const;
-    static int barsFor (int choice) { return std::array<int, 5> { 1, 2, 4, 8, 16 }[(size_t) juce::jlimit (0, 4, choice)]; }
+    static int barsFor (int choice) { return std::array<int, 7> { 1, 2, 4, 8, 16, 32, 64 }[(size_t) juce::jlimit (0, 6, choice)]; }
+    static juce::StringArray barNames() { return { "1 bar", "2 bars", "4 bars", "8 bars", "16 bars", "32 bars", "64 bars" }; }
 
-    juce::CachedValue<int> barsChoice, polarity;
+    juce::CachedValue<int> barsChoice, polarity, playMode;   // playMode 0 loop, 1 once
+    juce::CachedValue<double> startBeat;                     // where the pattern starts in the song
     te::AutomatableParameter* transpose = nullptr;
     std::atomic<bool> recording { false };
     std::atomic<double> playheadBeat { -1.0 };     // for the editor

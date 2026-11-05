@@ -68,8 +68,9 @@ void LinesEngine::process (const LinesPattern& pat, double b0, double b1, double
     steps = jmax (1, steps);
     for (int s = 0; s < steps; ++s)
     {
-        const double b = b0 + (b1 - b0) * s / steps;
-        const double cycle = std::floor (b / L), pos = b - cycle * L;
+        const double b = b0 + (b1 - b0) * s / steps - pat.offset;
+        double cycle = std::floor (b / L), pos = b - cycle * L;
+        if (pat.once && cycle != 0) { cycle = -1; pos = -1; }   // outside the single pass: everything ends
         // end notes that are finished (or whose line vanished)
         for (auto it = voices.begin(); it != voices.end();)
         {
@@ -129,7 +130,9 @@ void LinesEngine::process (const LinesPattern& pat, double b0, double b1, double
 LinesPlugin::LinesPlugin (te::PluginCreationInfo info) : ReelEffect (info), sourceID (te::createUniqueMPESourceID())
 {
     transpose = addP ("transpose", "Transpose", { -24.0f, 24.0f, 1.0f }, 0.0f, Fmt::st);
-    addChoice (barsChoice, "bars", "Pattern length", { "1 bar", "2 bars", "4 bars", "8 bars", "16 bars" }, 2);
+    addChoice (barsChoice, "bars", "Pattern length", barNames(), 2);
+    addChoice (playMode, "playMode", "Play", { "Loop", "Once" }, 0);
+    startBeat.referTo (state, "startBeat", getUndoManager(), 0.0);
     addChoice (polarity, "polarity", "Slide", { "Unipolar", "Bipolar" }, 0);
     state.addListener (&watcher);
     rebuild();
@@ -197,6 +200,8 @@ void LinesPlugin::rebuild()
     auto p = std::make_shared<LinesPattern>();
     p->lengthBeats = lengthBeats();
     p->bipolarSlide = polarity.get() == 1;
+    p->once = playMode.get() == 1;
+    p->offset = playMode.get() == 1 ? startBeat.get() : 0.0;
     for (auto c : lineTrees())
     {
         if ((bool) c.getProperty ("rec", false)) continue;   // still being recorded: you hear it live
@@ -231,7 +236,8 @@ void LinesPlugin::applyToBuffer (const te::PluginRenderContext& fc)
     {
         if (recording.load() && fc.isPlaying)
         {
-            const double beat = std::fmod (jmax (0.0, b0 + m.getTimeStamp() * bps), L);
+            const double rel = b0 + m.getTimeStamp() * bps - (pat ? pat->offset : 0.0);
+            const double beat = rel - std::floor (rel / L) * L;
             RecEvent e { -1, m.getChannel(), m.isNoteOnOrOff() ? m.getNoteNumber() : 0, 0, beat };
             if (m.isNoteOn()) { e.type = 0; e.value = m.getVelocity(); }
             else if (m.isNoteOff()) e.type = 1;
@@ -260,7 +266,8 @@ void LinesPlugin::applyToBuffer (const te::PluginRenderContext& fc)
     LinesPattern withTranspose = *pat;
     withTranspose.transpose = transpose->getCurrentValue();
     engine.process (withTranspose, b0, b1, spb, jmax (1, fc.bufferNumSamples / 64), emit);
-    playheadBeat.store (std::fmod (b1, L));
+    const double rel = b1 - pat->offset;
+    playheadBeat.store (pat->once ? (rel >= 0 && rel < L ? rel : -1.0) : rel - std::floor (rel / L) * L);
 }
 
 void LinesPlugin::timerCallback()

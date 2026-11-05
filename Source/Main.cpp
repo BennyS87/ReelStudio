@@ -1,7 +1,7 @@
 #include "MainComponent.h"
 #include <iostream>
 
-namespace Reel { int runSelfTest (te::Engine&, const juce::File&); int runLiveTest (te::Engine&, const juce::File&); }
+namespace Reel { int runSelfTest (te::Engine&, const juce::File&); int runLiveTest (te::Engine&, const juce::File&); int runMigrateTest (te::Engine&, const juce::File&); }
 
 class ReelApplication : public juce::JUCEApplication
 {
@@ -22,8 +22,15 @@ public:
         engine->getPluginManager().createBuiltInType<Reel::EchoPlugin>();
         engine->getPluginManager().createBuiltInType<Reel::ReverbPlugin>();
         engine->getPluginManager().createBuiltInType<Reel::LinesPlugin>();
+        engine->getPluginManager().createBuiltInType<Reel::ReelSampler>();
 
         auto args = juce::StringArray::fromTokens (commandLine, true);
+        if (args.contains ("--migratetest"))
+        {
+            Reel::runMigrateTest (*engine, juce::File (args[args.indexOf ("--migratetest") + 1]));
+            quit();
+            return;
+        }
         if (args.contains ("--livetest"))
         {
             const int fails = Reel::runLiveTest (*engine, juce::File::getCurrentWorkingDirectory().getChildFile ("livetest"));

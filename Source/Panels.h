@@ -43,6 +43,7 @@ private:
     void build() override;
     void buildSynth (te::AudioTrack&, te::FourOscPlugin&);
     void buildSampler (te::AudioTrack&);
+    void addInstrumentChooser (te::AudioTrack&, bool isSampler);
     void buildKit (te::AudioTrack&);
     std::unique_ptr<juce::FileChooser> chooser;
 };

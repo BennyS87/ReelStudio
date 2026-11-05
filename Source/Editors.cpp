@@ -442,8 +442,11 @@ void EditorPanel::rebuild()
             m.addItem (1, "Melody (one note at a time: voice, bass, lead)");
             m.addItem (2, "Chords (several notes at once)");
             m.addItem (3, "Drums (kick, snare, hi-hat)");
+            m.addSeparator();
+            m.addItem (4, "Lines (follows every slide and wobble)");
             m.showMenuAsync (juce::PopupMenu::Options(), [this, get] (int r)
             {
+                if (auto* w = dynamic_cast<te::WaveAudioClip*> (get()); w != nullptr && r == 4) { session.convertToLines (*w); return; }
                 if (auto* w = dynamic_cast<te::WaveAudioClip*> (get()); w != nullptr && r > 0)
                     session.convertToMidi (*w, r == 1 ? TranscribeMode::melody : r == 2 ? TranscribeMode::chords : TranscribeMode::drums);
             });

@@ -26,4 +26,10 @@ namespace Reel
         drums:  hits, sorted into kick, snare and hi-hat.
         sensitivity 0..1: higher finds quieter notes. */
     std::vector<TranscribedNote> transcribe (const juce::File&, TranscribeMode, float sensitivity = 0.5f);
+
+    /** The pitch curve of a recording as lines: each sung or played phrase keeps its slides and vibrato.
+        Point times are seconds from the start of the file; level (0..1) is the loudness there. */
+    struct ContourPoint { double time; float pitch, level; };
+    struct ContourLine { std::vector<ContourPoint> points; int velocity = 100; };
+    std::vector<ContourLine> transcribeContour (const juce::File&, float sensitivity = 0.5f);
 }

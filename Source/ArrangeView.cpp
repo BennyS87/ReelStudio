@@ -607,10 +607,13 @@ void ArrangeView::showClipMenu (te::Clip& c)
     {
         m.addItem (4, w->getIsReversed() ? "Play forwards again" : "Reverse");
         m.addItem (5, "Make a playable instrument from this sound");
+        m.addItem (11, "Save this sound as an instrument...");
         juce::PopupMenu tm;
         tm.addItem (8, "Melody (one note at a time: voice, bass, lead)");
         tm.addItem (9, "Chords (several notes at once)");
         tm.addItem (10, "Drums (kick, snare, hi-hat)");
+        tm.addSeparator();
+        tm.addItem (12, "Lines (follows every slide and wobble)");
         m.addSubMenu ("Turn into MIDI notes", tm);
     }
     m.addSeparator();
@@ -630,6 +633,20 @@ void ArrangeView::showClipMenu (te::Clip& c)
             case 5: if (w) session.makeSamplerFromClip (*w); break;
             case 6: session.loopClip (*c); break;
             case 7: session.deleteClip (*c); break;
+            case 11:
+                if (w)
+                {
+                    auto* aw = new juce::AlertWindow ("Save as an instrument", "It will appear in the Instrument list of every synth and sampler track, and under Add track.", juce::MessageBoxIconType::NoIcon);
+                    aw->addTextEditor ("name", w->getName().isEmpty() ? juce::String ("My instrument") : w->getName());
+                    aw->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey)); aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+                    te::Clip::Ptr keep (w);
+                    aw->enterModalState (true, juce::ModalCallbackFunction::create ([this, aw, keep] (int res)
+                    {
+                        if (auto* wc = dynamic_cast<te::WaveAudioClip*> (keep.get()); wc != nullptr && res == 1) session.saveClipAsInstrument (*wc, aw->getTextEditorContents ("name"));
+                    }), true);
+                }
+                break;
+            case 12: if (w) session.convertToLines (*w); break;
             case 8: case 9: case 10:
                 if (w) session.convertToMidi (*w, r == 8 ? TranscribeMode::melody : r == 9 ? TranscribeMode::chords : TranscribeMode::drums);
                 break;

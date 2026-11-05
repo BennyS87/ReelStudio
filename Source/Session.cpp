@@ -153,6 +153,7 @@ void Session::detachEdit()
 
 void Session::attachEdit()
 {
+    migrateSamplers();
     edit->state.addListener (this);
     edit->getTransport().ensureContextAllocated();
     selectedTrack = selectedClip = lastInstrumentTrack = {};
@@ -233,7 +234,7 @@ te::AudioTrack* Session::addTrack (Kind k, const juce::String& name)
     }
     else if (k == Kind::sampler)
     {
-        if (auto p = edit->getPluginCache().createNewPlugin (te::SamplerPlugin::xmlTypeName, {}))
+        if (auto p = edit->getPluginCache().createNewPlugin (ReelSampler::xmlTypeName, {}))
             t->pluginList.insertPlugin (p, 0, nullptr);
     }
     else if (k == Kind::drums)
@@ -501,6 +502,194 @@ te::AudioTrack* Session::makeSamplerFromClip (te::WaveAudioClip& c)
 //==============================================================================
 te::FourOscPlugin* Session::getSynth (te::AudioTrack& t) const { return t.pluginList.findFirstPluginOfType<te::FourOscPlugin>(); }
 te::SamplerPlugin* Session::getSampler (te::AudioTrack& t) const { return t.pluginList.findFirstPluginOfType<te::SamplerPlugin>(); }
+ReelSampler* Session::getSampled (te::AudioTrack& t) const { return t.pluginList.findFirstPluginOfType<ReelSampler>(); }
+
+te::Plugin* Session::instrumentOf (te::AudioTrack& t) const
+{
+    if (auto* s = getSynth (t)) return s;
+    if (auto* s = getSampled (t)) return s;
+    if (getKind (t) == Kind::sampler) return getSampler (t);
+    return nullptr;
+}
+
+/** Projects from before Reel's own sampler used Tracktion's: swap those for the new one, keeping the sound and its settings. */
+void Session::migrateSamplers()
+{
+    for (auto* t : te::getAudioTracks (*edit))
+    {
+        if (getKind (*t) != Kind::sampler || getSampled (*t) != nullptr) continue;
+        auto* old = getSampler (*t);
+        if (old == nullptr) continue;
+        const int idx = t->pluginList.indexOf (old);
+        auto p = edit->getPluginCache().createNewPlugin (ReelSampler::xmlTypeName, {});
+        auto* ns = dynamic_cast<ReelSampler*> (p.get());
+        if (ns == nullptr) continue;
+        if (old->getNumSounds() > 0)
+        {
+            // the sound's path may be stored relative to the project, so try each way of finding it
+            juce::File src;
+            const auto stored = t->state.getProperty (IDs::samplePath).toString();
+            if (juce::File::isAbsolutePath (stored)) src = juce::File (stored);
+            if (! src.existsAsFile()) src = old->getSoundFile (0).getFile();
+            if (! src.existsAsFile())
+            {
+                // straight from the saved project: right after loading, the old sampler hasn't built its sound list yet
+                const auto media = old->state.getChildWithName (te::IDs::SOUND).getProperty (te::IDs::source).toString();
+                src = juce::File::isAbsolutePath (media) ? juce::File (media)
+                                                         : (edit->editFileRetriever ? edit->editFileRetriever().getParentDirectory().getChildFile (media) : juce::File());
+            }
+            ns->loadFile (src, nullptr);
+            ns->root = old->getKeyNote (0);
+            ns->level->setParameter (old->getSoundGainDb (0), juce::dontSendNotification);
+            ns->pan->setParameter (old->getSoundPan (0), juce::dontSendNotification);
+            ns->oneShot = old->isSoundOpenEnded (0) ? 1 : 0;
+        }
+        old->deleteFromParent();
+        t->pluginList.insertPlugin (p, juce::jmax (0, idx), nullptr);
+    }
+}
+
+juce::File Session::instrumentsDir() { auto d = appDataDir().getChildFile ("Instruments"); d.createDirectory(); return d; }
+
+juce::StringArray Session::myInstrumentNames()
+{
+    juce::StringArray names;
+    for (auto& d : instrumentsDir().findChildFiles (juce::File::findDirectories, false))
+        if (d.getChildFile ("instrument.xml").existsAsFile()) names.add (d.getFileName());
+    names.sortNatural();
+    return names;
+}
+
+bool Session::saveInstrument (te::AudioTrack& t, const juce::String& rawName)
+{
+    auto* s = getSampled (t);
+    if (s == nullptr || ! s->hasSound()) { if (onMessage) onMessage ("This track has no sound to save yet."); return false; }
+    auto name = juce::File::createLegalFileName (rawName.trim()); if (name.isEmpty()) name = "My instrument";
+    auto dir = instrumentsDir().getChildFile (name);
+    dir.createDirectory();
+    auto src = s->getFile(), dst = dir.getChildFile ("sound" + src.getFileExtension());
+    if (src != dst) { dst.deleteFile(); if (! src.copyFileTo (dst)) { if (onMessage) onMessage ("Could not copy the sound into your instruments."); return false; } }
+    auto v = s->state.createCopy();
+    v.setProperty ("file", dst.getFileName(), nullptr);
+    v.setProperty ("soundName", name, nullptr);
+    v.removeProperty ("mpe", nullptr);
+    if (auto xml = v.createXml(); xml == nullptr || ! xml->writeTo (dir.getChildFile ("instrument.xml"))) return false;
+    t.state.setProperty (IDs::sampleName, name, &undoManager());
+    if (onMessage) onMessage ("Saved " + name + ". Choose it from the Instrument list on any synth or sampler track, or from Add track.");
+    return true;
+}
+
+bool Session::saveClipAsInstrument (te::WaveAudioClip& c, const juce::String& name)
+{
+    auto file = renderClip (c, appDataDir().getChildFile ("Analysis").getChildFile ("instrument.wav"));
+    if (file == juce::File()) return false;
+    // build it on a temporary track so the note detection and settings match a normal sampler track
+    auto* t = addTrack (Kind::sampler, "Instrument");
+    const bool ok = loadSamplerSound (*t, file, true) && saveInstrument (*t, name);
+    deleteTrack (*t);
+    return ok;
+}
+
+bool Session::applyInstrument (te::AudioTrack& t, const juce::String& name)
+{
+    const auto k = getKind (t);
+    if (k != Kind::synth && k != Kind::sampler) return false;
+    auto dir = instrumentsDir().getChildFile (name);
+    auto xml = juce::parseXML (dir.getChildFile ("instrument.xml"));
+    if (xml == nullptr) { if (onMessage) onMessage ("That instrument could not be found."); return false; }
+    auto v = juce::ValueTree::fromXml (*xml);
+    const auto soundFile = dir.getChildFile (v.getProperty ("file").toString());
+    if (! soundFile.existsAsFile()) { if (onMessage) onMessage ("The sound for " + name + " is missing."); return false; }
+    int idx = getLines (t) != nullptr ? 1 : 0;
+    if (auto* old = instrumentOf (t)) { idx = t.pluginList.indexOf (old); old->deleteFromParent(); }
+    auto p = edit->getPluginCache().createNewPlugin (ReelSampler::xmlTypeName, {});
+    auto* ns = dynamic_cast<ReelSampler*> (p.get());
+    if (ns == nullptr) return false;
+    t.pluginList.insertPlugin (p, juce::jmax (0, idx), nullptr);
+    ns->restorePluginStateFromValueTree (v);
+    ns->loadFile (soundFile, nullptr);
+    ns->soundName = name;
+    ns->setMpe (getLines (t) != nullptr);
+    t.state.setProperty (IDs::kind, kindToString (Kind::sampler), &undoManager());
+    t.state.setProperty (IDs::sampleName, name, &undoManager());
+    t.state.setProperty (IDs::samplePath, soundFile.getFullPathName(), &undoManager());
+    ++structureVersion; sendChangeMessage();
+    return true;
+}
+
+bool Session::applySynthSound (te::AudioTrack& t, const juce::String& preset)
+{
+    if (getSynth (t) != nullptr) { setSynthPreset (t, preset); return true; }
+    if (getKind (t) != Kind::sampler) return false;
+    int idx = getLines (t) != nullptr ? 1 : 0;
+    if (auto* old = instrumentOf (t)) { idx = t.pluginList.indexOf (old); old->deleteFromParent(); }
+    auto p = edit->getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {});
+    if (p == nullptr) return false;
+    t.pluginList.insertPlugin (p, juce::jmax (0, idx), nullptr);
+    t.state.setProperty (IDs::kind, kindToString (Kind::synth), &undoManager());
+    setSynthPreset (t, preset);
+    if (getLines (t) != nullptr) if (auto* s = getSynth (t)) s->state.setProperty (te::IDs::mpe, true, &undoManager());
+    ++structureVersion; sendChangeMessage();
+    return true;
+}
+
+te::AudioTrack* Session::addInstrumentTrack (const juce::String& name)
+{
+    auto* t = addTrack (Kind::sampler, name);
+    if (! applyInstrument (*t, name)) { deleteTrack (*t); return nullptr; }
+    select (t);
+    return t;
+}
+
+bool Session::deleteInstrument (const juce::String& name)
+{
+    auto d = instrumentsDir().getChildFile (name);
+    return d.isDirectory() && d.moveToTrash();
+}
+
+te::AudioTrack* Session::convertToLines (te::WaveAudioClip& c)
+{
+    auto file = renderClip (c, appDataDir().getChildFile ("Analysis").getChildFile ("clip.wav"));
+    if (file == juce::File()) { if (onMessage) onMessage ("Could not read that clip."); return nullptr; }
+    auto contour = transcribeContour (file);
+    if (contour.empty()) { if (onMessage) onMessage ("No clear pitch was found. Lines works best on one voice or instrument at a time."); return nullptr; }
+    beginAction();
+    auto* src = dynamic_cast<te::AudioTrack*> (c.getTrack());
+    const auto clipName = c.getName().isEmpty() ? juce::String ("Audio") : c.getName();
+    auto* t = addTrack (Kind::synth, (clipName + " lines").substring (0, 40));
+    std::vector<float> ps; for (auto& l : contour) for (auto& p : l.points) ps.push_back (p.pitch);
+    std::sort (ps.begin(), ps.end());
+    setSynthPreset (*t, ps[ps.size() / 2] < 48 ? "Round bass" : "Soft keys");
+    auto* lp = addLines (*t);
+    if (lp == nullptr) return t;
+    const auto start = c.getPosition().getStart();
+    const double b0 = toBeats (start).inBeats();
+    const double lenBeats = toBeats (c.getPosition().getEnd()).inBeats() - b0;
+    int choice = 6; for (int i = 0; i < 7; ++i) if (LinesPlugin::barsFor (i) * 4.0 >= lenBeats - 1e-6) { choice = i; break; }
+    lp->barsChoice = choice;
+    lp->playMode = 1;                 // play once, lined up with the recording
+    lp->startBeat = b0;
+    const double L = lp->lengthBeats();
+    int made = 0;
+    for (auto& cl : contour)
+    {
+        LineData d; d.velocity = cl.velocity / 127.0f;
+        for (auto& p : cl.points)
+        {
+            const double tb = toBeats (start + te::TimeDuration::fromSeconds (p.time)).inBeats() - b0;
+            if (tb >= L) break;
+            d.pts.push_back ({ tb, p.pitch, p.level, 0.5f, true });
+        }
+        if (d.pts.size() < 2) continue;
+        lp->addLine (d, &undoManager());
+        ++made;
+    }
+    if (src != nullptr) moveTrack (*t, tracks().indexOf (src) + 1 - tracks().indexOf (t));
+    select (t);
+    if (onMessage) onMessage ("Turned " + clipName + " into " + juce::String (made) + (made == 1 ? " line" : " lines") + " that follow its slides and wobbles. Open the Lines tab to reshape them"
+                              + (lenBeats > L ? juce::String (" (only the first 64 bars fit).") : juce::String (".")));
+    return t;
+}
 
 void Session::setSynthPreset (te::AudioTrack& t, const juce::String& name)
 {
@@ -509,13 +698,10 @@ void Session::setSynthPreset (te::AudioTrack& t, const juce::String& name)
 
 bool Session::loadSamplerSound (te::AudioTrack& t, const juce::File& f, bool findNote)
 {
-    auto* s = getSampler (t);
-    te::AudioFile af (engine, f);
-    if (s == nullptr || ! af.isValid()) { if (onMessage) onMessage (f.getFileName() + " could not be read."); return false; }
-    while (s->getNumSounds() > 0) s->removeSound (0);
-    s->addSound (f.getFullPathName(), f.getFileNameWithoutExtension(), 0.0, 0.0, 0.0f);
-    s->setSoundParams (0, 60, 0, 127);
-    s->setSoundOpenEnded (0, af.getLength() < 1.2);
+    auto* s = getSampled (t);
+    if (s == nullptr || ! s->loadFile (f, &undoManager())) { if (onMessage) onMessage (f.getFileName() + " could not be read."); return false; }
+    s->root = 60;
+    s->oneShot = s->soundSeconds() < 1.2 ? 1 : 0;
     t.state.setProperty (IDs::sampleName, f.getFileNameWithoutExtension(), &undoManager());
     t.state.setProperty (IDs::samplePath, f.getFullPathName(), &undoManager());
     if (findNote)
@@ -531,11 +717,9 @@ bool Session::loadSamplerSound (te::AudioTrack& t, const juce::File& f, bool fin
 
 std::optional<PitchResult> Session::findSamplerNote (te::AudioTrack& t)
 {
-    auto* s = getSampler (t);
-    if (s == nullptr || s->getNumSounds() == 0) return {};
-    const auto path = t.state.getProperty (IDs::samplePath).toString();
-    if (! juce::File::isAbsolutePath (path)) return {};
-    auto file = juce::File (path);
+    auto* s = getSampled (t);
+    if (s == nullptr || ! s->hasSound()) return {};
+    auto file = s->getFile();
     auto r = detectPitch (file);
     if (r && r->confidence > 0.5) { setSamplerRoot (t, juce::jlimit (12, 108, r->note)); return r; }
     setSamplerRoot (t, 60);
@@ -544,7 +728,7 @@ std::optional<PitchResult> Session::findSamplerNote (te::AudioTrack& t)
 
 void Session::setSamplerRoot (te::AudioTrack& t, int note)
 {
-    if (auto* s = getSampler (t)) if (s->getNumSounds() > 0) s->setSoundParams (0, note, 0, 127);
+    if (auto* s = getSampled (t)) s->root = juce::jlimit (0, 127, note);
 }
 
 float Session::getKitValue (te::AudioTrack& t, const juce::Identifier& base, int v, float def) const
@@ -597,7 +781,7 @@ void Session::auditionDrum (te::AudioTrack& t, int voice)
 static bool isEffectPlugin (te::Plugin* p)
 {
     return p != nullptr && ! p->isSynth() && dynamic_cast<te::VolumeAndPanPlugin*> (p) == nullptr && dynamic_cast<te::LevelMeterPlugin*> (p) == nullptr
-        && dynamic_cast<te::SamplerPlugin*> (p) == nullptr && dynamic_cast<te::FourOscPlugin*> (p) == nullptr && dynamic_cast<LinesPlugin*> (p) == nullptr;
+        && dynamic_cast<te::SamplerPlugin*> (p) == nullptr && dynamic_cast<te::FourOscPlugin*> (p) == nullptr && dynamic_cast<LinesPlugin*> (p) == nullptr && dynamic_cast<ReelSampler*> (p) == nullptr;
 }
 
 LinesPlugin* Session::getLines (te::AudioTrack& t) const { return t.pluginList.findFirstPluginOfType<LinesPlugin>(); }
@@ -609,6 +793,7 @@ LinesPlugin* Session::addLines (te::AudioTrack& t)
     if (p == nullptr) return nullptr;
     t.pluginList.insertPlugin (p, 0, nullptr);   // before the instrument, so it feeds it
     if (auto* s = getSynth (t)) s->state.setProperty (te::IDs::mpe, true, &undoManager());   // each line bends on its own
+    if (auto* s = getSampled (t)) s->setMpe (true);
     return dynamic_cast<LinesPlugin*> (p.get());
 }
 
@@ -618,6 +803,7 @@ void Session::removeLines (te::AudioTrack& t)
     {
         l->deleteFromParent();
         if (auto* s = getSynth (t)) s->state.setProperty (te::IDs::mpe, false, &undoManager());
+        if (auto* s = getSampled (t)) s->setMpe (false);
     }
 }
 

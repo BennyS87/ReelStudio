@@ -380,15 +380,99 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
 
     // ---- sound to instrument ----
     auto* sam = s.makeSamplerFromClip (*getClip());
-    check (sam != nullptr && s.getSampler (*sam) != nullptr && s.getSampler (*sam)->getNumSounds() == 1, "make a playable instrument from a clip");
-    if (sam != nullptr)
+    check (sam != nullptr && s.getSampled (*sam) != nullptr && s.getSampled (*sam)->hasSound(), "make a playable instrument from a clip");
+    if (sam != nullptr && s.getSampled (*sam) != nullptr)
     {
-        check (s.getSampler (*sam)->getKeyNote (0) == 57, "found the sound's note: A3 (got " + noteName (s.getSampler (*sam)->getKeyNote (0)) + ")");
+        check (s.getSampled (*sam)->root.get() == 57, "found the sound's note: A3 (got " + noteName (s.getSampled (*sam)->root.get()) + ")");
         if (auto* mc = s.addMidiClip (*sam, {}, 1)) mc->getSequence().addNote (60, {}, te::BeatDuration::fromBeats (3), 100, 0, nullptr);
         auto f8 = dir.getChildFile ("sampler.wav");
         renderTrack (s, *sam, f8, { te::TimePosition(), te::TimePosition::fromSeconds (1.5) });
         auto p8 = detectPitch (f8, 0.1, 1.0);
         check (p8 && std::abs (p8->freq - 261.63) < 4.0, "playing C4 on that instrument sounds at 261.6 Hz, got " + juce::String (p8 ? p8->freq : 0.0, 1));
+
+        // Lines gliding the recorded sound itself
+        for (auto* c : sam->getClips()) c->removeFromParent();
+        if (auto* lp = s.addLines (*sam))
+        {
+            lp->barsChoice = 1;
+            LineData g; g.pts = { { 0.0, 60, 0.7f, 0.5f, false }, { 1.0, 60, 0.7f, 0.5f, true }, { 3.0, 67, 0.7f, 0.5f, false }, { 4.0, 67, 0.7f, 0.5f, false } };
+            lp->addLine (g, nullptr);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+            auto gf = dir.getChildFile ("sampler-lines.wav");
+            renderTrack (s, *sam, gf, { te::TimePosition(), te::TimePosition::fromSeconds (2.2) });
+            const double spb = 60.0 / s.getBpm();
+            auto a = detectPitch (gf, 0.05, 0.4 * spb), b = detectPitch (gf, 3.1 * spb, 0.8 * spb);
+            check (s.getSampled (*sam)->mpe.get() && a && std::abs (a->freq - 261.6) < 4 && b && std::abs (b->freq - 392.0) < 5,
+                   "Lines glides a recorded sound: " + juce::String (a ? a->freq : 0.0, 1) + " Hz rising to " + juce::String (b ? b->freq : 0.0, 1) + " Hz (want 261.6 and 392.0)");
+            s.removeLines (*sam);
+        }
+
+        // save it as an instrument and use it on a synth track's notes
+        s.deleteInstrument ("Selftest tone");
+        check (s.saveInstrument (*sam, "Selftest tone") && s.myInstrumentNames().contains ("Selftest tone")
+               && s.instrumentsDir().getChildFile ("Selftest tone").getChildFile ("instrument.xml").existsAsFile(), "save the sound as an instrument (copied into Instruments)");
+        auto* st = s.addTrack (Kind::synth, "Uses instrument");
+        if (auto* mc = s.addMidiClip (*st, {}, 1)) mc->getSequence().addNote (72, {}, te::BeatDuration::fromBeats (3), 100, 0, nullptr);
+        const bool applied = s.applyInstrument (*st, "Selftest tone");
+        auto af = dir.getChildFile ("applied.wav");
+        renderTrack (s, *st, af, { te::TimePosition(), te::TimePosition::fromSeconds (1.4) });
+        auto pa = detectPitch (af, 0.1, 1.0);
+        check (applied && getKind (*st) == Kind::sampler && s.getSynth (*st) == nullptr && st->getClips().size() == 1 && pa && std::abs (pa->freq - 523.3) < 7,
+               "apply the saved instrument to a synth track: its notes now play the sound (C5 at " + juce::String (pa ? pa->freq : 0.0, 1) + " Hz)");
+        check (s.applySynthSound (*st, "Soft keys") && getKind (*st) == Kind::synth && s.getSynth (*st) != nullptr && s.getSampled (*st) == nullptr && st->getClips().size() == 1,
+               "switch that track back to a synth sound, keeping its notes");
+        auto* it = s.addInstrumentTrack ("Selftest tone");
+        check (it != nullptr && s.getSampled (*it) != nullptr && s.getSampled (*it)->root.get() == 57, "Add track, My instrument makes a track with the saved sound and its note");
+        s.deleteTrack (*st); if (it) s.deleteTrack (*it);
+
+        // projects from before Reel's own sampler open with the new one
+        {
+            Session old (engine);
+            auto* ot = old.addTrack (Kind::sampler, "Old sampler");
+            if (auto* rs = old.getSampled (*ot)) rs->deleteFromParent();
+            auto op = old.edit->getPluginCache().createNewPlugin (te::SamplerPlugin::xmlTypeName, {});
+            if (auto* ts = dynamic_cast<te::SamplerPlugin*> (op.get()))
+            {
+                ot->pluginList.insertPlugin (op, 0, nullptr);
+                ts->addSound (s.getSampled (*sam)->getFile().getFullPathName(), "tone", 0.0, 0.0, 0.0f);
+                ts->setSoundParams (0, 57, 0, 127);
+            }
+            auto of = dir.getChildFile ("old-sampler.tracktionedit");
+            old.saveProject (of);
+            Session reopened (engine);
+            reopened.openProject (of);
+            auto* rt = reopened.tracks().getFirst();
+            auto* rs = rt ? reopened.getSampled (*rt) : nullptr;
+            int oldSounds = -1; if (rt) if (auto* os = reopened.getSampler (*rt)) oldSounds = os->getNumSounds();
+            check (rs != nullptr && rs->hasSound() && rs->root.get() == 57 && reopened.getSampler (*rt) == nullptr,
+                   "a project made with the old sampler opens with the new one, keeping its sound and note (tracks " + juce::String (reopened.tracks().size())
+                   + ", kind " + (rt ? kindToString (getKind (*rt)) : juce::String ("none")) + ", new " + juce::String (rs ? 1 : 0) + ", sound " + juce::String (rs && rs->hasSound() ? 1 : 0)
+                   + ", root " + juce::String (rs ? rs->root.get() : -1) + ", old sounds " + juce::String (oldSounds) + ")");
+        }
+    }
+
+    // ---- recordings into Lines ----
+    {
+        auto* at = s.addTrack (Kind::audio, "Sung line");
+        auto* wc = s.importAudio (dir.getChildFile ("lines.wav"), at, te::TimePosition::fromSeconds (s.barLength().inSeconds()));
+        te::AudioTrack* made = wc ? s.convertToLines (*wc) : nullptr;
+        auto* lp = made ? s.getLines (*made) : nullptr;
+        if (lp != nullptr)
+        {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+            auto pat = lp->snapshot();
+            const LineData* first = pat && ! pat->lines.empty() ? &pat->lines.front() : nullptr;
+            for (auto& l : pat->lines) if (first == nullptr || l.end() - l.start() > first->end() - first->start()) first = &l;
+            const float lo = first ? first->pitchAt (first->start() + 0.3) : 0, hi = first ? first->pitchAt (first->start() + 3.3) : 0, mid = first ? first->pitchAt (first->start() + 2.0) : 0;
+            check (first != nullptr && std::abs (lo - 60) < 0.4f && std::abs (hi - 67) < 0.4f && mid > 61.5f && mid < 65.5f,
+                   "Turn into Lines follows the recording's glide: " + juce::String (lo, 2) + " then " + juce::String (mid, 2) + " mid-slide then " + juce::String (hi, 2) + " ("
+                   + juce::String (pat ? (int) pat->lines.size() : 0) + " lines)");
+            check (lp->playMode.get() == 1 && std::abs (lp->startBeat.get() - s.toBeats (wc->getPosition().getStart()).inBeats()) < 1e-6,
+                   "the lines play once, lined up with the recording (from bar " + juce::String (lp->startBeat.get() / 4.0 + 1.0, 1) + ")");
+        }
+        else check (false, "Turn into Lines made a Lines track");
+        if (made) s.deleteTrack (*made);
+        s.deleteTrack (*at);
     }
 
     // ---- MIDI file import ----
@@ -550,5 +634,17 @@ int runLiveTest (te::Engine& engine, const juce::File& dir)
     }
     std::cout << (fails == 0 ? "ALL LIVE TESTS PASSED" : juce::String (fails) + " LIVE TEST(S) FAILED") << std::endl;
     return fails;
+}
+
+int runMigrateTest (te::Engine& engine, const juce::File& f)
+{
+    Session s (engine);
+    s.openProject (f);
+    auto* t = s.tracks().getFirst();
+    auto* rs = t ? s.getSampled (*t) : nullptr;
+    std::cout << "after open: sampler " << (rs != nullptr) << " hasSound " << (rs && rs->hasSound()) << " file '" << (rs ? rs->file.get() : juce::String()) << "' root " << (rs ? rs->root.get() : -1) << std::endl;
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+    std::cout << "after a moment: hasSound " << (rs && rs->hasSound()) << " file '" << (rs ? rs->file.get() : juce::String()) << "'" << std::endl;
+    return 0;
 }
 }

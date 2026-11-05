@@ -379,8 +379,16 @@ void LinesPanel::changeListenerCallback (ChangeBroadcaster*)
     auto* t = session.getSelectedTrack();
     const bool inst = t != nullptr && isInstrument (t);
     auto* lp = inst ? session.getLines (*t) : nullptr;
-    if (session.selectedTrack != shownTrack || lp != shownLines || inst != shownInstrument) rebuild();
+    const auto clipNow = t != nullptr && getKind (*t) == Kind::audio ? audioClipFor (*t) : te::EditItemID();
+    if (session.selectedTrack != shownTrack || lp != shownLines || inst != shownInstrument || clipNow != shownClip) rebuild();
     else if (canvas) { canvas->repaint(); if (lane) lane->repaint(); }
+}
+
+te::EditItemID LinesPanel::audioClipFor (te::AudioTrack& t) const
+{
+    if (auto* c = dynamic_cast<te::WaveAudioClip*> (session.getSelectedClip()); c != nullptr && c->getTrack() == &t) return c->itemID;
+    for (auto* c : t.getClips()) if (dynamic_cast<te::WaveAudioClip*> (c) != nullptr) return c->itemID;
+    return {};
 }
 
 void LinesPanel::rebuild()
@@ -398,6 +406,7 @@ void LinesPanel::rebuild()
     auto* t = session.getSelectedTrack();
     shownInstrument = t != nullptr && isInstrument (t);
     shownLines = shownInstrument ? session.getLines (*t) : nullptr;
+    shownClip = t != nullptr && getKind (*t) == Kind::audio ? audioClipFor (*t) : te::EditItemID();
     hint.setText ({}, dontSendNotification);
     auto add = [this] (Component* c, int w, int h) { controls.add (c); c->setSize (w, h); addAndMakeVisible (c); return c; };
     struct Labelled : Component
@@ -407,9 +416,32 @@ void LinesPanel::rebuild()
         std::unique_ptr<Label> label; std::unique_ptr<Component> child; int labelW;
     };
     auto addLabelled = [&] (const String& text, Component* c, int lw, int w) { add (new Labelled (text, c, lw), lw + w, 28); return c; };
+    if (t != nullptr && getKind (*t) == Kind::audio)
+    {
+        te::WaveAudioClip* clip = dynamic_cast<te::WaveAudioClip*> (session.getSelectedClip());
+        if (clip == nullptr || clip->getTrack() != t) for (auto* c : t->getClips()) if (auto* w = dynamic_cast<te::WaveAudioClip*> (c)) { clip = w; break; }
+        if (clip == nullptr)
+        {
+            hint.setText ("Record or drop a recording on this track, then use Lines on it here: turn its melody into lines, or play lines with its sound.", dontSendNotification);
+            resized(); return;
+        }
+        te::Clip::Ptr keepClip (clip);
+        add (makeTextButton ("Turn " + clip->getName() + " into lines", [this, keepClip]
+        { if (auto* w = dynamic_cast<te::WaveAudioClip*> (keepClip.get())) session.convertToLines (*w); }), 300, 32)
+            ->setColour (TextButton::buttonColourId, Col::acc.withAlpha (0.35f));
+        add (makeTextButton ("Play lines with this sound", [this, keepClip]
+        {
+            auto* w = dynamic_cast<te::WaveAudioClip*> (keepClip.get()); if (w == nullptr) return;
+            if (auto* nt = session.makeSamplerFromClip (*w)) { session.addLines (*nt); session.select (nt); }
+        }), 220, 32);
+        hint.setText ("Turn into lines follows the recording's pitch, slides and vibrato and draws them as lines on a new synth track, lined up with the recording, "
+                      "so you can reshape the melody and play it with any sound. Play lines with this sound makes a playable instrument from the recording and adds Lines to it, "
+                      "so the lines you draw glide the recording itself.", dontSendNotification);
+        resized(); return;
+    }
     if (t == nullptr || ! isInstrument (t))
     {
-        hint.setText ("Lines is a sequencer for synth, sampler and drum tracks. Select one of those tracks to draw notes as lines with glides, pressure and slide.", dontSendNotification);
+        hint.setText ("Lines is a sequencer for synth, sampler and drum tracks, and works with recordings on audio tracks. Select a track to start.", dontSendNotification);
         resized(); return;
     }
     auto* lp = session.getLines (*t);
@@ -453,7 +485,15 @@ void LinesPanel::rebuild()
     const double grids[] = { 1.0, 0.5, 0.25, 0.125, 0.0 }; const char* gridNames[] = { "1/4", "1/8", "1/16", "1/32", "Free" };
     for (int i = 0; i < 5; ++i) { gridBox->addItem (gridNames[i], i + 1); if (std::abs (grids[i] - c->grid) < 1e-9) gridBox->setSelectedId (i + 1, dontSendNotification); }
     gridBox->onChange = [c, gridBox, grids] { c->grid = grids[gridBox->getSelectedId() - 1]; c->repaint(); };
-    addLabelled ("Length", makeChoiceBox (lp->barsChoice, { "1 bar", "2 bars", "4 bars", "8 bars", "16 bars" }, {}, &um), 48, 90);
+    addLabelled ("Length", makeChoiceBox (lp->barsChoice, LinesPlugin::barNames(), {}, &um, [c] { c->repaint(); }), 48, 90);
+    auto* startBar = new Slider (Slider::IncDecButtons, Slider::TextBoxLeft);
+    addLabelled ("Play", makeChoiceBox (lp->playMode, { "Loop", "Once" }, {}, &um, [startBar, keep]
+    { if (auto* l = dynamic_cast<LinesPlugin*> (keep.get())) startBar->setEnabled (l->playMode.get() == 1); }), 34, 84);
+    addLabelled ("from bar", startBar, 56, 96);
+    startBar->setRange (1, 999, 1); startBar->setTextBoxStyle (Slider::TextBoxLeft, false, 44, 26); startBar->setScrollWheelEnabled (false);
+    startBar->setValue (lp->startBeat.get() / 4.0 + 1.0, dontSendNotification);
+    startBar->setEnabled (lp->playMode.get() == 1);
+    startBar->onValueChange = [keep, startBar, &um] { if (auto* l = dynamic_cast<LinesPlugin*> (keep.get())) { um.beginNewTransaction(); l->startBeat = (startBar->getValue() - 1.0) * 4.0; } };
     addLabelled ("Slide", makeChoiceBox (lp->polarity, { "Unipolar", "Bipolar" }, {}, &um), 38, 100);
     auto* tr = static_cast<Slider*> (addLabelled ("Transpose", new Slider (Slider::IncDecButtons, Slider::TextBoxLeft), 68, 96));
     tr->setTextBoxStyle (Slider::TextBoxLeft, false, 44, 26);

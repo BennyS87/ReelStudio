@@ -3,6 +3,7 @@
 #include "ReelPlugins.h"
 #include "Dsp.h"
 #include "LinesPlugin.h"
+#include "ReelSampler.h"
 
 namespace Reel
 {
@@ -79,7 +80,19 @@ public:
 
     // ---- instruments ----
     te::FourOscPlugin* getSynth (te::AudioTrack&) const;
-    te::SamplerPlugin* getSampler (te::AudioTrack&) const;
+    te::SamplerPlugin* getSampler (te::AudioTrack&) const;       // the drum kit's sampler
+    ReelSampler* getSampled (te::AudioTrack&) const;               // a sampler track's instrument
+
+    // ---- my instruments (saved sampled sounds) ----
+    juce::File instrumentsDir();
+    juce::StringArray myInstrumentNames();
+    bool saveInstrument (te::AudioTrack&, const juce::String& name);
+    bool saveClipAsInstrument (te::WaveAudioClip&, const juce::String& name);
+    bool applyInstrument (te::AudioTrack&, const juce::String& name);     // swaps the track's instrument, keeps its notes
+    bool applySynthSound (te::AudioTrack&, const juce::String& preset);   // back to a synth
+    te::AudioTrack* addInstrumentTrack (const juce::String& name);
+    bool deleteInstrument (const juce::String& name);
+    te::AudioTrack* convertToLines (te::WaveAudioClip&);
     void setSynthPreset (te::AudioTrack&, const juce::String& name);
     bool loadSamplerSound (te::AudioTrack&, const juce::File&, bool findNote);
     std::optional<PitchResult> findSamplerNote (te::AudioTrack&);
@@ -167,6 +180,8 @@ private:
     te::InputDeviceInstance* routeAudioInput (te::AudioTrack&);
     void disarmAll();
     juce::File renderClip (te::WaveAudioClip&, const juce::File&);
+    void migrateSamplers();
+    te::Plugin* instrumentOf (te::AudioTrack&) const;
     bool dirty = false;
     juce::File autosaveFile;
 };

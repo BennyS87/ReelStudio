@@ -148,6 +148,7 @@ void SoundPanel::buildSynth (te::AudioTrack& t, te::FourOscPlugin& s)
         }), true);
     }), 150, 30);
     add (button ("Reset", [this, id, current] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) { session.beginAction(); session.setSynthPreset (*t, current); rebuildNow(); } }), 80, 30);
+    addInstrumentChooser (t, false);
     hintText ("Start from a sound above, then shape it: four oscillators, a filter with its own envelope, two LFOs and two modulation envelopes you can route to any setting. "
               "Play notes while you turn knobs to hear changes straight away.", 900, 40);
 
@@ -305,12 +306,46 @@ void SoundPanel::buildSynth (te::AudioTrack& t, te::FourOscPlugin& s)
     hintText ("Play with a MIDI keyboard, the keys at the bottom, or your computer: A W S E D F T G Y H U J K (Z and X change octave).");
 }
 
+/** A name prompt shared by the save buttons. */
+static void askForName (const juce::String& title, const juce::String& text, const juce::String& def, std::function<void (juce::String)> done)
+{
+    auto* w = new juce::AlertWindow (title, text, juce::MessageBoxIconType::NoIcon);
+    w->addTextEditor ("name", def);
+    w->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey)); w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([w, done] (int r) { if (r == 1) done (w->getTextEditorContents ("name").trim()); }), true);
+}
+
+void SoundPanel::addInstrumentChooser (te::AudioTrack& t, bool isSampler)
+{
+    auto id = t.itemID;
+    auto builtIns = builtInPresetNames(), users = userPresetNames(), mine = session.myInstrumentNames();
+    juce::StringArray names; juce::Array<int> ids; int sel = 0;
+    const auto current = t.state.getProperty (IDs::sampleName).toString();
+    if (isSampler)
+    {
+        for (int i = 0; i < builtIns.size(); ++i) { names.add ("Synth: " + builtIns[i]); ids.add (i + 1); }
+        for (int i = 0; i < users.size(); ++i) { names.add ("Synth: " + users[i]); ids.add (1000 + i); }
+    }
+    for (int i = 0; i < mine.size(); ++i) { names.add ("My instrument: " + mine[i]); ids.add (2000 + i); if (isSampler && mine[i] == current) sel = 2000 + i; }
+    if (names.isEmpty()) return;
+    auto* box = add (combo (names, ids, sel, [this, id, builtIns, users, mine] (int v)
+    {
+        auto* t = te::findAudioTrackForID (*session.edit, id); if (t == nullptr) return;
+        session.beginAction();
+        if (v >= 2000) session.applyInstrument (*t, mine[v - 2000]);
+        else session.applySynthSound (*t, v >= 1000 ? "user:" + users[v - 1000] : builtIns[v - 1]);
+        rebuildNow();
+    }), 280, 30);
+    if (sel == 0) box->setText (isSampler ? "Change instrument..." : "Use one of my instruments...", juce::dontSendNotification);
+}
+
 void SoundPanel::buildSampler (te::AudioTrack& t)
 {
     auto id = t.itemID;
-    auto* s = session.getSampler (t);
-    const bool hasSound = s != nullptr && s->getNumSounds() > 0;
-    heading (hasSound ? "Sound: " + t.state.getProperty (IDs::sampleName, "loaded").toString() : juce::String ("No sound loaded"), false);
+    auto* um = &session.undoManager();
+    auto* s = session.getSampled (t);
+    const bool hasSound = s != nullptr && s->hasSound();
+    heading (hasSound ? "Sound: " + t.state.getProperty (IDs::sampleName, s->soundName.get()).toString() : juce::String ("No sound loaded"), false);
     add (button ("Load sound file", [this, id]
     {
         chooser = std::make_unique<juce::FileChooser> ("Choose a sound", juce::File(), session.engine.getAudioFileFormatManager().readFormatManager.getWildcardForAllFormats());
@@ -320,12 +355,20 @@ void SoundPanel::buildSampler (te::AudioTrack& t)
             if (auto* t = te::findAudioTrackForID (*session.edit, id)) if (f.existsAsFile()) { session.beginAction(); session.loadSamplerSound (*t, f, true); rebuildNow(); }
         });
     }), 150, 30);
-    if (! hasSound)
+    addInstrumentChooser (t, true);
+    if (! hasSound || s == nullptr)
     {
         hintText ("Load any short sound: a voice, a hit, one note from a recording. Reel finds its musical note so it plays in tune on every key. "
                   "Or right-click an audio clip on the timeline and choose Make a playable instrument.", 900, 54);
         return;
     }
+    add (button ("Save as instrument", [this, id]
+    {
+        auto* t = te::findAudioTrackForID (*session.edit, id); if (t == nullptr) return;
+        askForName ("Save as an instrument", "It will appear in the Instrument list of every synth and sampler track, and under Add track.",
+                    t->state.getProperty (IDs::sampleName, "My instrument").toString(),
+                    [this, id] (juce::String n) { if (auto* t = te::findAudioTrackForID (*session.edit, id)) if (session.saveInstrument (*t, n)) rebuildNow(); });
+    }), 160, 30)->setColour (juce::TextButton::buttonColourId, Col::acc.withAlpha (0.35f));
     add (button ("Find its note", [this, id]
     {
         if (auto* t = te::findAudioTrackForID (*session.edit, id))
@@ -337,20 +380,24 @@ void SoundPanel::buildSampler (te::AudioTrack& t)
             rebuildNow();
         }
     }), 120, 30);
-    auto* box = add (new Box ("Playing", "The original note is the key that plays the sound at its own pitch. Every other key shifts it."), 560, 120);
-    box->add (new ValueKnob ("Original note", 12, 108, 1, 60, [s] { return (double) s->getKeyNote (0); },
-                             [this, id] (double v) { if (auto* t = te::findAudioTrackForID (*session.edit, id)) session.setSamplerRoot (*t, (int) v); },
-                             [] (double v) { return noteName ((int) v); }), 80, 78);
-    box->add (new ValueKnob ("Level", -30, 6, 0.1, 0, [s] { return (double) s->getSoundGainDb (0); },
-                             [s] (double v) { s->setSoundGains (0, (float) v, s->getSoundPan (0)); },
-                             [] (double v) { return juce::String (v, 1) + " dB"; }), 70, 78);
-    box->add (new ValueKnob ("Pan", -1, 1, 0.01, 0, [s] { return (double) s->getSoundPan (0); },
-                             [s] (double v) { s->setSoundGains (0, s->getSoundGainDb (0), (float) v); },
-                             [] (double v) { return std::abs (v) < 0.01 ? juce::String ("C") : (v < 0 ? "L" : "R") + juce::String (juce::roundToInt (std::abs (v) * 100)); }), 62, 78);
-    auto* whole = box->add (new juce::ToggleButton ("Play the whole sound on any tap"), 260, 30);
-    whole->setToggleState (s->isSoundOpenEnded (0), juce::dontSendNotification);
-    whole->onClick = [this, s, whole] { session.beginAction(); s->setSoundOpenEnded (0, whole->getToggleState()); };
-    hintText ("Play it on your MIDI keyboard, the keys at the bottom, or A to K on your computer. Record what you play with the red button.");
+    te::Plugin::Ptr keep (s);
+    auto* play = add (new Box ("Playing", "The original note is the key that plays the sound at its own pitch; every other key shifts it, and Lines can glide it."), 640, 120);
+    play->add (new ValueKnob ("Original note", 12, 108, 1, 60, [keep] { auto* p = dynamic_cast<ReelSampler*> (keep.get()); return p ? (double) p->root.get() : 60.0; },
+                              [this, id] (double v) { if (auto* t = te::findAudioTrackForID (*session.edit, id)) session.setSamplerRoot (*t, (int) v); },
+                              [] (double v) { return noteName ((int) v); }), 80, 78);
+    for (auto* p : { s->fine, s->level, s->pan }) play->add (new ParamKnob (p, {}, um), 68, 78);
+    play->add (captionLabel ("Play"), 34, 28);
+    play->add (makeChoiceBox (s->oneShot, { "While held", "Whole sound" }, {}, um), 120, 28);
+    auto* env = add (new Box ("Envelope", "How each note fades in, settles and fades out."), 330, 120);
+    for (auto* p : { s->attack, s->decay, s->sustain, s->release }) env->add (new ParamKnob (p, {}, um), 68, 78);
+    auto* tone = add (new Box ("Tone and expression", "Pressure and slide come from Lines or an MPE keyboard."), 260, 120);
+    for (auto* p : { s->cutoff, s->pressureAmt, s->slideAmt }) tone->add (new ParamKnob (p, {}, um), 72, 78);
+    auto* lp = add (new Box ("Start and loop", "Skip the start of the sound, or loop part of it so long notes keep going."), 420, 120);
+    lp->add (new ParamKnob (s->startAt, {}, um), 64, 78);
+    lp->add (captionLabel ("Loop"), 36, 28);
+    lp->add (makeChoiceBox (s->loopMode, { "Off", "On" }, {}, um), 76, 28);
+    for (auto* p : { s->loopStart, s->loopEnd }) lp->add (new ParamKnob (p, {}, um), 64, 78);
+    hintText ("Play it on your MIDI keyboard, the keys at the bottom, or A to K on your computer. Add Lines in the Lines tab to draw glides with this sound.");
 }
 
 void SoundPanel::buildKit (te::AudioTrack& t)

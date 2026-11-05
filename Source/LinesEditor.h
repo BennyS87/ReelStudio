@@ -84,6 +84,8 @@ private:
     Session& session;
     te::EditItemID shownTrack; int shownVersion = -1; LinesPlugin* shownLines = nullptr; bool shownInstrument = false;
     LinesCanvas::View view;
+    te::EditItemID shownClip;
+    te::EditItemID audioClipFor (te::AudioTrack&) const;
     juce::OwnedArray<juce::Component> controls;
     std::unique_ptr<LinesCanvas> canvas;
     std::unique_ptr<ExpressionLane> lane;
