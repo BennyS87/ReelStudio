@@ -5,6 +5,7 @@
 #include "LinesPlugin.h"
 #include "ReelSampler.h"
 #include "Arpeggiator.h"
+#include "Engines.h"
 
 namespace Reel
 {
@@ -104,6 +105,13 @@ public:
     void setKitValue (te::AudioTrack&, const juce::Identifier& base, int voice, float value);
     void applyKit (te::AudioTrack&);
     void auditionDrum (te::AudioTrack&, int voice);
+
+    // ---- sound engines ----
+    EnginePlugin* getEngine (te::AudioTrack&) const;
+    te::AudioTrack* addEngineTrack (int engineType);
+    /** source: "synth:<sound>", "mine:<instrument>", a file path, or empty to clear. */
+    bool setEngineLayer (te::AudioTrack&, int layer, const juce::String& source);
+    juce::File synthSourceFile (const juce::String& preset);   // one held C4 of a synth sound, rendered once
 
     // ---- arpeggiator ----
     ArpPlugin* getArp (te::AudioTrack&) const;

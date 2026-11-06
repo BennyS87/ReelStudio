@@ -45,6 +45,7 @@ private:
     void buildSampler (te::AudioTrack&);
     void addInstrumentChooser (te::AudioTrack&, bool isSampler);
     void addArpBox (te::AudioTrack&);
+    void buildEngine (te::AudioTrack&);
     void buildKit (te::AudioTrack&);
     std::unique_ptr<juce::FileChooser> chooser;
 };

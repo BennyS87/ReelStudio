@@ -12,7 +12,7 @@ MainComponent::MainComponent (Session& s)
     session.onMessage = [this] (const juce::String& m) { showMessage (m); };
     mixerWrap.trackCount = [this] { return session.tracks().size(); };
 
-    for (auto* b : { &bStart, &bPlay, &bStop, &bRec, &bLoop, &bClick, &bZoomOut, &bZoomIn, &bAdd, &bUndo, &bRedo, &bProject, &bHelp })
+    for (auto* b : { &bStart, &bPlay, &bStop, &bRec, &bLoop, &bClick, &bZoomOut, &bZoomIn, &bAdd, &bUndo, &bRedo, &bProject, &bHelp, &bView })
     { addAndMakeVisible (*b); b->setWantsKeyboardFocus (false); }
     bAdd.setColour (juce::TextButton::buttonColourId, Col::acc);
     bAdd.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff241800));
@@ -39,6 +39,8 @@ MainComponent::MainComponent (Session& s)
     bUndo.onClick    = [this] { session.undoManager().undo(); };
     bRedo.onClick    = [this] { session.undoManager().redo(); };
     bProject.onClick = [this] { showProjectMenu(); };
+    bView.onClick = [this] { showViewMenu(); };
+    bView.setTooltip ("Move sections to the side or into their own windows, fill the window, full screen");
     bHelp.onClick    = [this] { showHelp(); };
 
     counter.setFont (juce::FontOptions (26.0f, juce::Font::bold)); counter.setColour (juce::Label::textColourId, Col::acc);
@@ -60,19 +62,27 @@ MainComponent::MainComponent (Session& s)
     snapBox.setWantsKeyboardFocus (false);
     addAndMakeVisible (snapBox);
 
-    addAndMakeVisible (arrange);
     arrange.onFilesDropped = [this] (const juce::StringArray& f, te::AudioTrack* t, te::TimePosition at) { importFiles (f, t, at); };
     arrange.onImportAudioRequest = [this] (te::AudioTrack* t, te::TimePosition at) { browseForAudio (t, at); };
     arrange.onOpenEditor = [this] { openEditorTab(); };
 
-    tabs.setTabBarDepth (34);
-    tabs.addTab ("Editor", Col::panel, &editorPanel, false);
-    tabs.addTab ("Sound", Col::panel, &soundWrap, false);
-    tabs.addTab ("Effects", Col::panel, &effectsWrap, false);
-    tabs.addTab ("Mixer", Col::panel, &mixerWrap, false);
-    tabs.addTab ("Lines", Col::panel, &linesPanel, false);
-    tabs.setOutline (0);
-    addAndMakeVisible (tabs);
+    dock.setCentre (arrange);
+    dock.addPanel ("Editor", editorPanel);
+    dock.addPanel ("Sound", soundWrap);
+    dock.addPanel ("Effects", effectsWrap);
+    dock.addPanel ("Mixer", mixerWrap);
+    dock.addPanel ("Lines", linesPanel);
+    dock.keys = [this] (const juce::KeyPress& k) { return keyPressed (k); };
+    dock.keyState = [this] (bool down) { return keyStateChanged (down); };
+    dock.onLayoutChanged = [this] { resized(); saveLayout(); };
+    dock.addGlobalItems = [this] (juce::PopupMenu& m)
+    {
+        auto* w = findParentComponentOfClass<juce::DocumentWindow>();
+        m.addItem ("Timeline fills the window", true, dock.getFill() == 3, [this] { dock.setFill (dock.getFill() == 3 ? -1 : 3); });
+        m.addItem ("Full screen", true, w != nullptr && w->isFullScreen(), [this] { toggleFullScreen(); });
+    };
+    addAndMakeVisible (dock);
+    loadLayout();
 
     keyboard.setLowestVisibleKey (36);
     keyboard.setWantsKeyboardFocus (false);
@@ -109,8 +119,6 @@ void MainComponent::paint (juce::Graphics& g)
     g.setColour (Col::text); g.setFont (juce::FontOptions (24.0f, juce::Font::bold));
     g.drawText ("Reel", 14, 0, 60, 52, juce::Justification::centredLeft);
     g.setColour (Col::acc); g.fillEllipse (66, 31, 6, 6);
-    g.setColour (Col::panel); g.fillRect (divider);
-    g.setColour (Col::line); g.drawHorizontalLine (divider.getY(), 0, (float) getWidth());
 }
 
 void MainComponent::resized()
@@ -118,32 +126,83 @@ void MainComponent::resized()
     auto r = getLocalBounds();
     auto bar = r.removeFromTop (52).reduced (8, 9);
     bar.removeFromLeft (76);
-    for (auto* b : { &bStart, &bPlay, &bStop, &bRec, &bLoop, &bClick }) { b->setBounds (bar.removeFromLeft (b == &bRec ? 66 : b == &bStart ? 36 : 54)); bar.removeFromLeft (4); }
+    for (auto* b : { &bStart, &bPlay, &bStop, &bRec, &bLoop, &bClick }) { b->setBounds (bar.removeFromLeft (b == &bRec ? 64 : b == &bStart ? 34 : 50)); bar.removeFromLeft (4); }
     bar.removeFromLeft (8);
-    auto lcd = bar.removeFromLeft (164); counter.setBounds (lcd.removeFromLeft (94)); timeLabel.setBounds (lcd);
+    auto lcd = bar.removeFromLeft (150); counter.setBounds (lcd.removeFromLeft (86)); timeLabel.setBounds (lcd);
     bar.removeFromLeft (10);
-    tempoCaption.setBounds (bar.removeFromLeft (46)); tempo.setBounds (bar.removeFromLeft (100)); bar.removeFromLeft (8);
-    snapCaption.setBounds (bar.removeFromLeft (38)); snapBox.setBounds (bar.removeFromLeft (92)); bar.removeFromLeft (8);
+    tempoCaption.setBounds (bar.removeFromLeft (44)); tempo.setBounds (bar.removeFromLeft (92)); bar.removeFromLeft (6);
+    snapCaption.setBounds (bar.removeFromLeft (36)); snapBox.setBounds (bar.removeFromLeft (86)); bar.removeFromLeft (6);
     bZoomOut.setBounds (bar.removeFromLeft (34)); bar.removeFromLeft (4); bZoomIn.setBounds (bar.removeFromLeft (34));
-    bHelp.setBounds (bar.removeFromRight (34)); bar.removeFromRight (6);
-    bProject.setBounds (bar.removeFromRight (80)); bar.removeFromRight (6);
-    bRedo.setBounds (bar.removeFromRight (58)); bar.removeFromRight (4); bUndo.setBounds (bar.removeFromRight (58)); bar.removeFromRight (10);
+    bHelp.setBounds (bar.removeFromRight (30)); bar.removeFromRight (5);
+    bProject.setBounds (bar.removeFromRight (72)); bar.removeFromRight (5);
+    bView.setBounds (bar.removeFromRight (56)); bar.removeFromRight (5);
+    bRedo.setBounds (bar.removeFromRight (52)); bar.removeFromRight (4); bUndo.setBounds (bar.removeFromRight (52)); bar.removeFromRight (8);
     bAdd.setBounds (bar.removeFromRight (96)); bar.removeFromRight (10);
 
-    keyboard.setBounds (r.removeFromBottom (64));
-    dockHeight = juce::jlimit (160, juce::jmax (160, r.getHeight() - 160), dockHeight);
-    tabs.setBounds (r.removeFromBottom (dockHeight));
-    midiLabel.setBounds (tabs.getRight() - 470, tabs.getY() + 4, 460, 26);
-    divider = r.removeFromBottom (7);
-    arrange.setBounds (r);
-    toast.setBounds (juce::Rectangle<int> (juce::jmin (720, getWidth() - 40), 38).withCentre ({ arrange.getBounds().getCentreX(), arrange.getBottom() - 34 }));
+    keyboard.setVisible (keyboardShown);
+    if (keyboardShown) keyboard.setBounds (r.removeFromBottom (64));
+    dock.setBounds (r);
+    // the keyboard status sits over the right of the bottom tabs, clear of the section menu button
+    const auto tb = dock.bottomTabBar();
+    midiLabel.setVisible (! tb.isEmpty() && tb.getWidth() > 900);
+    if (! tb.isEmpty()) midiLabel.setBounds (dock.getX() + tb.getRight() - 520, dock.getY() + tb.getY() + 4, 470, 26);
+    midiLabel.toFront (false);
+    const auto ab = arrange.isVisible() ? arrange.getBounds() + dock.getPosition() : dock.getBounds();
+    toast.setBounds (juce::Rectangle<int> (juce::jmin (720, getWidth() - 40), 38).withCentre ({ ab.getCentreX(), ab.getBottom() - 34 }));
+    toast.toFront (false);
 }
 
-void MainComponent::mouseDown (const juce::MouseEvent& e) { dragStartDock = dockHeight; grabKeyboardFocus(); juce::ignoreUnused (e); }
+void MainComponent::mouseDown (const juce::MouseEvent&) { grabKeyboardFocus(); }
+void MainComponent::mouseDrag (const juce::MouseEvent&) {}
 
-void MainComponent::mouseDrag (const juce::MouseEvent& e)
+void MainComponent::toggleFullScreen()
 {
-    if (divider.expanded (0, 4).contains (e.getMouseDownPosition())) { dockHeight = dragStartDock - e.getDistanceFromDragStartY(); resized(); }
+    if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) w->setFullScreen (! w->isFullScreen());
+}
+
+void MainComponent::saveLayout()
+{
+    auto v = dock.getState();
+    v.setProperty ("keyboard", keyboardShown, nullptr);
+    if (auto xml = v.createXml()) xml->writeTo (appDataDir().getChildFile ("Layout.xml"));
+}
+
+void MainComponent::loadLayout()
+{
+    if (auto xml = juce::parseXML (appDataDir().getChildFile ("Layout.xml")))
+    {
+        auto v = juce::ValueTree::fromXml (*xml);
+        keyboardShown = v.getProperty ("keyboard", true);
+        dock.restoreState (v);
+    }
+}
+
+void MainComponent::showViewMenu()
+{
+    juce::PopupMenu m;
+    m.addSectionHeader ("Sections");
+    for (auto& name : dock.panelNames())
+    {
+        juce::PopupMenu sm;
+        const auto place = dock.placeOf (name);
+        const char* labels[] = { "At the bottom", "On the left", "On the right", "In its own window" };
+        for (int i = 0; i < 4; ++i) sm.addItem (labels[i], true, (int) place == i, [this, name, i] { if (dock.getFill() >= 0) dock.setFill (-1); dock.movePanel (name, (DockPlace) i); });
+        if (auto* w = dock.windowFor (name))
+        {
+            sm.addSeparator();
+            sm.addItem ("Full screen", true, w->isFullScreen(), [w] { w->setFullScreen (! w->isFullScreen()); });
+        }
+        m.addSubMenu (name, sm);
+    }
+    m.addSeparator();
+    m.addItem ("Timeline fills the window", true, dock.getFill() == 3, [this] { dock.setFill (dock.getFill() == 3 ? -1 : 3); });
+    if (dock.getFill() >= 0) m.addItem ("Back to the normal layout (Esc)", [this] { dock.setFill (-1); });
+    m.addItem ("Show the on-screen keyboard", true, keyboardShown, [this] { keyboardShown = ! keyboardShown; resized(); saveLayout(); });
+    auto* w = findParentComponentOfClass<juce::DocumentWindow>();
+    m.addItem ("Full screen (Cmd+Ctrl+F)", true, w != nullptr && w->isFullScreen(), [this] { toggleFullScreen(); });
+    m.addSeparator();
+    m.addItem ("Reset layout", [this] { keyboardShown = true; dock.resetLayout(); resized(); });
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (bView));
 }
 
 void MainComponent::changeListenerCallback (juce::ChangeBroadcaster*)
@@ -189,6 +248,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& k)
 {
     const auto mods = k.getModifiers();
     const int code = k.getKeyCode();
+    if (mods.isCommandDown() && mods.isCtrlDown() && (code == 'F' || code == 'f')) { toggleFullScreen(); return true; }
+    if (code == juce::KeyPress::escapeKey && dock.getFill() >= 0) { dock.setFill (-1); return true; }
     if (mods.isCommandDown())
     {
         if (code == 'Z' || code == 'z') { if (mods.isShiftDown()) session.undoManager().redo(); else session.undoManager().undo(); return true; }
@@ -200,8 +261,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& k)
     if (code == juce::KeyPress::homeKey || code == juce::KeyPress::returnKey) { bStart.onClick(); return true; }
     if (code == juce::KeyPress::deleteKey || code == juce::KeyPress::backspaceKey)
     {
-        if (tabs.getCurrentTabIndex() == 0 && editorPanel.deleteSelectedNotes()) return true;
-        if (tabs.getCurrentTabIndex() == 4 && linesPanel.deleteSelected()) return true;
+        if (editorPanel.isShowing() && editorPanel.deleteSelectedNotes()) return true;
+        if (linesPanel.isShowing() && linesPanel.deleteSelected()) return true;
         if (auto* c = session.getSelectedClip()) session.deleteClip (*c);
         return true;
     }
@@ -282,6 +343,7 @@ void MainComponent::showAddMenu()
     m.addItem (2, "Synth (built-in sounds)");
     m.addItem (3, "Sampler (play any sound on keys)");
     m.addItem (4, "Drum machine with step sequencer");
+    m.addItem (6, "Engine (Layers, Orbits, Threads, Chords, Disperse, Lattice)");
     auto mine = session.myInstrumentNames();
     if (! mine.isEmpty())
     {
@@ -297,7 +359,7 @@ void MainComponent::showAddMenu()
         if (r >= 100)
         {
             auto mine = session.myInstrumentNames();
-            if (r - 100 < mine.size()) { session.beginAction(); if (auto* t = session.addInstrumentTrack (mine[r - 100])) { session.select (t, session.addMidiClip (*t, session.snapToBar (session.transport().getPosition()), 2)); tabs.setCurrentTabIndex (1); } }
+            if (r - 100 < mine.size()) { session.beginAction(); if (auto* t = session.addInstrumentTrack (mine[r - 100])) { session.select (t, session.addMidiClip (*t, session.snapToBar (session.transport().getPosition()), 2)); dock.showPanel ("Sound"); } }
             return;
         }
         if (r == 5)
@@ -305,6 +367,17 @@ void MainComponent::showAddMenu()
             chooser = std::make_unique<juce::FileChooser> ("Import a MIDI file", juce::File(), "*.mid;*.midi");
             chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this] (const juce::FileChooser& fc)
             { if (fc.getResult().existsAsFile()) importFiles ({ fc.getResult().getFullPathName() }, nullptr, {}); });
+            return;
+        }
+        if (r == 6)
+        {
+            session.beginAction();
+            if (auto* t = session.addEngineTrack (0))
+            {
+                bool any = false; for (auto* x : session.tracks()) if (! x->getClips().isEmpty()) any = true;
+                session.select (t, session.addMidiClip (*t, any ? session.snapToBar (session.transport().getPosition()) : te::TimePosition(), 2));
+                dock.showPanel ("Sound");
+            }
             return;
         }
         if (r < 2) return;
@@ -325,7 +398,7 @@ void MainComponent::showAddMenu()
         }
         else if (k == Kind::synth) c = session.addMidiClip (*t, at, 2);
         session.select (t, c);
-        tabs.setCurrentTabIndex (k == Kind::sampler ? 1 : 0);
+        dock.showPanel (k == Kind::sampler ? "Sound" : "Editor");
     });
 }
 
@@ -402,6 +475,11 @@ void MainComponent::showHelp()
         "Record: select an audio track and press Record (or R) to record your microphone, or select a synth, sampler or drum track to record your MIDI keyboard. "
         "Choose the input and count-in in the Sound tab of an audio track.\n\n"
         "Audio to MIDI: right-click an audio clip, choose Turn into MIDI notes, then Melody, Chords or Drums.\n\n"
+        "Layout: each section (Editor, Sound, Effects, Mixer, Lines) can sit at the bottom, on either side or in its own window: use the ... button "
+        "on its tabs or the View button. Drag the edges between areas to resize them. Fill the window gives one area (or the timeline) the whole window; "
+        "Esc brings the others back. Cmd+Ctrl+F toggles full screen. Reel remembers your layout.\n\n"
+        "Engine: Add track, Engine gives an instrument with four sound layers and six ways to play them: Layers, Orbits, Threads, Chords, "
+        "Disperse and Lattice. Choose each layer's sound and the engine in the Sound tab.\n\n"
         "Arpeggiator: on a synth or sampler track, open the Sound tab and press Add arpeggiator. Hold a chord and it plays the notes in turn, "
         "in time with the song (or on its own clock when stopped). Choose the pattern, rate, octaves, gate, swing, velocity and hold.\n\n"
         "Instruments: right-click an audio clip and choose Save this sound as an instrument, or press Save as instrument on a sampler track. "

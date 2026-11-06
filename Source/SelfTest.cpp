@@ -501,6 +501,118 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
         }
     }
 
+    // ---- sound engines ----
+    {
+        const auto toneFile = s.instrumentsDir().getChildFile ("Selftest tone").getChildFile ("sound.wav");
+        auto* et = s.addTrack (Kind::sampler, "Engine test");
+        if (auto* rs = s.getSampled (*et)) rs->deleteFromParent();
+        auto ep = s.edit->getPluginCache().createNewPlugin (EnginePlugin::xmlTypeName, {});
+        et->pluginList.insertPlugin (ep, 0, nullptr);
+        auto* eng = dynamic_cast<EnginePlugin*> (ep.get());
+        check (eng != nullptr && eng->setLayerSound (0, toneFile, 57, "tone", nullptr) && eng->setLayerSound (1, toneFile, 57, "tone up", nullptr),
+               "the engine instrument loads recorded sounds into its layers");
+        if (eng != nullptr)
+        {
+            eng->layerTune[1]->setParameter (12.0f, juce::dontSendNotification);   // layer 2 an octave up, to tell them apart
+            eng->drift->setParameter (0.0f, juce::dontSendNotification);
+            const double spb = 60.0 / s.getBpm();
+            auto play = [&] (std::initializer_list<int> notes, double beats, double seconds, const juce::String& name)
+            {
+                for (auto* c : et->getClips()) c->removeFromParent();
+                if (auto* mc = s.addMidiClip (*et, {}, 2)) for (int nn : notes) mc->getSequence().addNote (nn, {}, te::BeatDuration::fromBeats (beats), 100, 0, nullptr);
+                auto f = dir.getChildFile (name + ".wav");
+                renderTrack (s, *et, f, { te::TimePosition(), te::TimePosition::fromSeconds (seconds) });
+                return f;
+            };
+            auto energy = [] (const juce::File& f, double hz, double from, double len)   // Goertzel: how much of one frequency is there
+            {
+                juce::AudioFormatManager fm; fm.registerBasicFormats();
+                std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (f));
+                if (r == nullptr) return 0.0;
+                const int a = (int) (from * r->sampleRate), n = (int) (len * r->sampleRate);
+                juce::AudioBuffer<float> b (1, n); r->read (&b, 0, n, a, true, false);
+                const double w = 2.0 * juce::MathConstants<double>::pi * hz / r->sampleRate, c = 2.0 * std::cos (w);
+                double s1 = 0, s2 = 0;
+                for (int i = 0; i < n; ++i) { const double s0 = b.getSample (0, i) + c * s1 - s2; s2 = s1; s1 = s0; }
+                return std::sqrt (s1 * s1 + s2 * s2 - c * s1 * s2) / n;
+            };
+            auto onsets = [] (const juce::File& f)   // new notes: sudden rises in loudness, even while the last one is still ringing
+            {
+                juce::AudioFormatManager fm; fm.registerBasicFormats();
+                std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (f));
+                if (r == nullptr) return 0;
+                const int n = (int) r->lengthInSamples, hop = (int) (r->sampleRate * 0.01);
+                juce::AudioBuffer<float> b (1, n); r->read (&b, 0, n, 0, true, false);
+                std::vector<float> env; float peak = 0;
+                for (int i = 0; i + hop < n; i += hop) { env.push_back (b.getRMSLevel (0, i, hop)); peak = juce::jmax (peak, env.back()); }
+                int count = 0, last = -100;
+                for (int i = 0; i < (int) env.size(); ++i)
+                {
+                    const float before = i >= 2 ? env[(size_t) i - 2] : 0.0f;
+                    if (env[(size_t) i] > peak * 0.3f && env[(size_t) i] > before * 1.3f && i - last >= 6) { ++count; last = i; }
+                }
+                return count;
+            };
+
+            eng->engine = EnginePlugin::layersEngine;
+            eng->blend->setParameter (0.0f, juce::dontSendNotification);
+            auto lf = play ({ 60 }, 2, 0.8, "eng-layers");
+            auto pl = detectPitch (lf, 0.1, 0.5);
+            check (pl && std::abs (pl->freq - 261.6) < 4, "Layers with Blend at zero plays just the first layer, in tune (" + juce::String (pl ? pl->freq : 0.0, 1) + " Hz)");
+
+            eng->engine = EnginePlugin::chordsEngine; eng->chordType = 0; eng->spread->setParameter (0.0f, juce::dontSendNotification);
+            auto cf = play ({ 60 }, 2, 0.8, "eng-chords");
+            const double eC = energy (cf, 261.6, 0.1, 0.5), eE = energy (cf, 329.6, 0.1, 0.5), eG = energy (cf, 392.0, 0.1, 0.5), eOff = energy (cf, 293.7, 0.1, 0.5);
+            check (eC > eOff * 4 && eE > eOff * 4 && eG > eOff * 4, "Chords turns one key into a major chord: C, E and G all sound (" + juce::String (eC / juce::jmax (1e-9, eOff), 0) + "x, "
+                   + juce::String (eE / juce::jmax (1e-9, eOff), 0) + "x, " + juce::String (eG / juce::jmax (1e-9, eOff), 0) + "x a note that isn't in it)");
+
+            eng->engine = EnginePlugin::disperseEngine; eng->disperseVoices = 3; eng->spread->setParameter (7.0f, juce::dontSendNotification);
+            eng->glide->setParameter (0.4f, juce::dontSendNotification);
+            auto df = play ({ 60 }, 4, 1.4, "eng-disperse");
+            const double gEarly = energy (df, 392.0, 0.02, 0.1), gLate = energy (df, 392.0, 0.8, 0.4), fLate = energy (df, 174.6, 0.8, 0.4);
+            check (gLate > gEarly * 3 && fLate > gEarly, "Disperse fans the voices out from the note to a fifth either side (G4 grows " + juce::String (gLate / juce::jmax (1e-9, gEarly), 1) + "x)");
+
+            eng->engine = EnginePlugin::latticeEngine; eng->latticeRate = 3; eng->density->setParameter (1.0f, juce::dontSendNotification);
+            eng->jumps->setParameter (0.0f, juce::dontSendNotification); eng->gate->setParameter (0.4f, juce::dontSendNotification);
+            auto tf = play ({ 60 }, 2, 1.1, "eng-lattice");
+            const int lat = onsets (tf);
+            check (lat >= 7 && lat <= 9, "Lattice turns one held note into sixteenths (" + juce::String (lat) + " hits in 2 beats, want 8)");
+
+            eng->engine = EnginePlugin::threadsEngine; eng->blend->setParameter (0.0f, juce::dontSendNotification);   // lane 1 alone
+            eng->laneSteps[0] = 7; eng->laneRate[0] = 3; eng->humanize->setParameter (0.0f, juce::dontSendNotification);
+            auto thf = play ({ 60, 64, 67 }, 2, 1.1, "eng-threads");
+            const int th = onsets (thf);
+            check (th >= 4 && th <= 6, "Threads plays the lane's own pattern: " + juce::String (th) + " notes in 8 steps (want 5, its rests stay silent)");
+
+            eng->engine = EnginePlugin::orbitsEngine; eng->motion = 0; eng->posY->setParameter (0.0f, juce::dontSendNotification);
+            eng->posX->setParameter (0.0f, juce::dontSendNotification);
+            auto o1 = play ({ 60 }, 2, 0.8, "eng-orbit-left");
+            eng->posX->setParameter (1.0f, juce::dontSendNotification);
+            auto o2 = play ({ 60 }, 2, 0.8, "eng-orbit-right");
+            auto p1 = detectPitch (o1, 0.1, 0.5), p2 = detectPitch (o2, 0.1, 0.5);
+            check (p1 && std::abs (p1->freq - 261.6) < 4 && p2 && std::abs (p2->freq - 523.3) < 8,
+                   "Orbits blends the corners: left corner plays layer 1 (" + juce::String (p1 ? p1->freq : 0.0, 1) + " Hz), right corner layer 2 (" + juce::String (p2 ? p2->freq : 0.0, 1) + " Hz)");
+        }
+        s.deleteTrack (*et);
+
+        // a ready-to-play engine track from Add track
+        auto* et2 = s.addEngineTrack (EnginePlugin::chordsEngine);
+        auto* e2 = et2 != nullptr ? s.getEngine (*et2) : nullptr;
+        int loaded = 0; if (e2) for (int i = 0; i < EnginePlugin::numLayers; ++i) if (e2->layerLoaded (i)) ++loaded;
+        check (e2 != nullptr && loaded == 4 && getKind (*et2) == Kind::engine && e2->engine.get() == EnginePlugin::chordsEngine,
+               "Add track, Engine makes an engine track with four synth sounds ready in its layers (" + juce::String (loaded) + " loaded)");
+        if (et2 != nullptr)
+        {
+            if (auto* mc = s.addMidiClip (*et2, {}, 1)) mc->getSequence().addNote (60, {}, te::BeatDuration::fromBeats (2), 100, 0, nullptr);
+            auto ef = dir.getChildFile ("engine-track.wav");
+            renderTrack (s, *et2, ef, { te::TimePosition(), te::TimePosition::fromSeconds (1.2) });
+            auto st2 = analyse (ef);
+            auto* arp = s.addArp (*et2);
+            check (st2.rms > 0.01 && arp != nullptr && et2->pluginList.indexOf (arp) < et2->pluginList.indexOf (e2), "the engine track plays (rms " + juce::String (st2.rms, 3) + ") and takes an arpeggiator in front");
+            s.deleteTrack (*et2);
+        }
+    }
+
     // ---- recordings into Lines ----
     {
         auto* at = s.addTrack (Kind::audio, "Sung line");
@@ -586,6 +698,41 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
         if (auto* t = uiSession->tracks()[1]) { if (auto* l = uiSession->addLines (*t)) { LineData d; d.pts = { { 0, 60 }, { 2, 64 } }; l->addLine (d, nullptr); } uiSession->select (t); }
         pump();
         std::cout << "      Lines editor showing" << std::endl;
+        {
+            auto& dock = ui->getDock();
+            dock.movePanel ("Mixer", DockPlace::right); pump();
+            dock.movePanel ("Sound", DockPlace::left); pump();
+            dock.movePanel ("Effects", DockPlace::window); pump();
+            auto* fx = dock.windowFor ("Effects");
+            const bool sideOk = dock.placeOf ("Mixer") == DockPlace::right && dock.placeOf ("Sound") == DockPlace::left;
+            const bool winOk = fx != nullptr && fx->isVisible();
+            dock.setFill (0); pump();
+            const bool fillOk = dock.getFill() == 0;
+            dock.setFill (3); pump();
+            uiSession->newProject(); pump();      // switching projects with sections spread about and one in a window
+            uiSession->loadDemo(); pump();
+            const auto saved = dock.getState();
+            dock.resetLayout(); pump();
+            dock.restoreState (saved); pump(); pump();
+            const bool restored = dock.placeOf ("Mixer") == DockPlace::right && dock.windowFor ("Effects") != nullptr;
+            if (auto* w = dock.windowFor ("Effects")) w->closeButtonPressed();
+            pump(); pump();
+            const bool closedBack = dock.windowFor ("Effects") == nullptr && dock.placeOf ("Effects") == DockPlace::bottom;
+            check (sideOk && winOk && fillOk && restored && closedBack,
+                   "sections dock on either side, open in their own window, fill the window, survive a project switch, restore, and closing a window docks it back");
+            dock.resetLayout(); pump();
+        }
+        if (auto* et = uiSession->addEngineTrack (EnginePlugin::threadsEngine))
+        {
+            ui->getDock().showPanel ("Sound");
+            for (int i = 0; i < 6; ++i)
+            {
+                uiSession->getEngine (*et)->engine = i;
+                uiSession->select (uiSession->tracks().getFirst()); pump();
+                uiSession->select (et); pump();
+            }
+            std::cout << "      engine screens showing" << std::endl;
+        }
         uiSession->select (uiSession->tracks().getFirst()); pump();
         std::cout << "      opening a saved project" << std::endl;
         uiSession->openProject (proj); pump();

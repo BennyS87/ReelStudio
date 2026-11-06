@@ -232,6 +232,11 @@ te::AudioTrack* Session::addTrack (Kind k, const juce::String& name)
             setSynthPreset (*t, "Soft keys");
         }
     }
+    else if (k == Kind::engine)
+    {
+        if (auto p = edit->getPluginCache().createNewPlugin (EnginePlugin::xmlTypeName, {}))
+            t->pluginList.insertPlugin (p, 0, nullptr);
+    }
     else if (k == Kind::sampler)
     {
         if (auto p = edit->getPluginCache().createNewPlugin (ReelSampler::xmlTypeName, {}))
@@ -508,6 +513,7 @@ te::Plugin* Session::instrumentOf (te::AudioTrack& t) const
 {
     if (auto* s = getSynth (t)) return s;
     if (auto* s = getSampled (t)) return s;
+    if (auto* e = getEngine (t)) return e;
     if (getKind (t) == Kind::sampler) return getSampler (t);
     return nullptr;
 }
@@ -781,7 +787,80 @@ void Session::auditionDrum (te::AudioTrack& t, int voice)
 static bool isEffectPlugin (te::Plugin* p)
 {
     return p != nullptr && ! p->isSynth() && dynamic_cast<te::VolumeAndPanPlugin*> (p) == nullptr && dynamic_cast<te::LevelMeterPlugin*> (p) == nullptr
-        && dynamic_cast<te::SamplerPlugin*> (p) == nullptr && dynamic_cast<te::FourOscPlugin*> (p) == nullptr && dynamic_cast<LinesPlugin*> (p) == nullptr && dynamic_cast<ReelSampler*> (p) == nullptr && dynamic_cast<ArpPlugin*> (p) == nullptr;
+        && dynamic_cast<te::SamplerPlugin*> (p) == nullptr && dynamic_cast<te::FourOscPlugin*> (p) == nullptr && dynamic_cast<LinesPlugin*> (p) == nullptr && dynamic_cast<ReelSampler*> (p) == nullptr && dynamic_cast<ArpPlugin*> (p) == nullptr && dynamic_cast<EnginePlugin*> (p) == nullptr;
+}
+
+EnginePlugin* Session::getEngine (te::AudioTrack& t) const { return t.pluginList.findFirstPluginOfType<EnginePlugin>(); }
+
+juce::File Session::synthSourceFile (const juce::String& preset)
+{
+    auto dir = appDataDir().getChildFile ("Sources"); dir.createDirectory();
+    auto f = dir.getChildFile (juce::File::createLegalFileName (preset) + ".wav");
+    if (f.existsAsFile()) return f;
+    auto* t = addTrack (Kind::synth, "Source");
+    setSynthPreset (*t, preset);
+    const double beats = toBeats (te::TimePosition::fromSeconds (3.5)).inBeats();
+    if (auto* mc = addMidiClip (*t, {}, 4)) mc->getSequence().addNote (60, {}, te::BeatDuration::fromBeats (beats), 100, 0, nullptr);
+    juce::BigInteger bits; bits.setBit (te::getAllTracks (*edit).indexOf (t));
+    te::Renderer::renderToFile ("Render sound", f, *edit, { te::TimePosition(), te::TimePosition::fromSeconds (5.0) }, bits, true, false, {}, false);   // with plugins: the synth is one
+    deleteTrack (*t);
+    if (f.existsAsFile())   // never keep a silent render
+    {
+        std::unique_ptr<juce::AudioFormatReader> r (engine.getAudioFileFormatManager().readFormatManager.createReaderFor (f));
+        float lowL = 0, highL = 0, lowR = 0, highR = 0;
+        if (r != nullptr) r->readMaxLevels (0, r->lengthInSamples, lowL, highL, lowR, highR);
+        const bool silent = r == nullptr || juce::jmax (-lowL, highL, -lowR, highR) < 1e-4f;
+        r.reset();
+        if (silent) f.deleteFile();
+    }
+    return f.existsAsFile() ? f : juce::File();
+}
+
+bool Session::setEngineLayer (te::AudioTrack& t, int layer, const juce::String& source)
+{
+    auto* e = getEngine (t);
+    if (e == nullptr) return false;
+    auto* um = &undoManager();
+    if (source.isEmpty()) { e->clearLayer (layer, um); ++structureVersion; sendChangeMessage(); return true; }
+    bool ok = false;
+    if (source.startsWith ("synth:"))
+    {
+        const auto name = source.fromFirstOccurrenceOf ("synth:", false, false);
+        auto f = synthSourceFile (name.startsWith ("user:") ? name : name);
+        ok = f != juce::File() && e->setLayerSound (layer, f, 60, name.replace ("user:", ""), um);
+    }
+    else if (source.startsWith ("mine:"))
+    {
+        const auto name = source.fromFirstOccurrenceOf ("mine:", false, false);
+        auto dir = instrumentsDir().getChildFile (name);
+        if (auto xml = juce::parseXML (dir.getChildFile ("instrument.xml")))
+        {
+            auto v = juce::ValueTree::fromXml (*xml);
+            ok = e->setLayerSound (layer, dir.getChildFile (v.getProperty ("file").toString()), (int) v.getProperty ("root", 60), name, um);
+        }
+    }
+    else
+    {
+        juce::File f (source);
+        auto p = detectPitch (f, 0.05, juce::jmin (1.0, 0.9));
+        ok = e->setLayerSound (layer, f, p ? p->note : 60, f.getFileNameWithoutExtension(), um);
+    }
+    if (! ok && onMessage) onMessage ("That sound could not be loaded.");
+    ++structureVersion; sendChangeMessage();
+    return ok;
+}
+
+te::AudioTrack* Session::addEngineTrack (int engineType)
+{
+    auto* t = addTrack (Kind::engine, EnginePlugin::engineNames()[juce::jlimit (0, 5, engineType)]);
+    if (auto* e = getEngine (*t))
+    {
+        e->engine = engineType;
+        const char* starters[] = { "Electric piano", "Warm pad", "Bell", "Strings" };
+        for (int i = 0; i < EnginePlugin::numLayers; ++i) setEngineLayer (*t, i, juce::String ("synth:") + starters[i]);
+    }
+    select (t);
+    return t;
 }
 
 ArpPlugin* Session::getArp (te::AudioTrack& t) const { return t.pluginList.findFirstPluginOfType<ArpPlugin>(); }

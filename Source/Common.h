@@ -22,7 +22,7 @@ namespace Reel
                                                  juce::Colour (0xffc49ae0), juce::Colour (0xff9bc46a), juce::Colour (0xff5fc0d6),
                                                  juce::Colour (0xffe3a15e), juce::Colour (0xffd6c15a) };
 
-    enum class Kind { audio, synth, sampler, drums };
+    enum class Kind { audio, synth, sampler, drums, engine };
 
     namespace IDs
     {
@@ -37,17 +37,18 @@ namespace Reel
         if (s == "synth")   return Kind::synth;
         if (s == "sampler") return Kind::sampler;
         if (s == "drums")   return Kind::drums;
+        if (s == "engine")  return Kind::engine;
         return Kind::audio;
     }
 
     inline juce::String kindToString (Kind k)
     {
-        switch (k) { case Kind::synth: return "synth"; case Kind::sampler: return "sampler"; case Kind::drums: return "drums"; default: return "audio"; }
+        switch (k) { case Kind::synth: return "synth"; case Kind::sampler: return "sampler"; case Kind::drums: return "drums"; case Kind::engine: return "engine"; default: return "audio"; }
     }
 
     inline juce::String kindLabel (Kind k)
     {
-        switch (k) { case Kind::synth: return "Synth"; case Kind::sampler: return "Sampler"; case Kind::drums: return "Drum machine"; default: return "Audio"; }
+        switch (k) { case Kind::synth: return "Synth"; case Kind::sampler: return "Sampler"; case Kind::drums: return "Drum machine"; case Kind::engine: return "Engine"; default: return "Audio"; }
     }
 
     inline bool isInstrument (const te::Track* t) { return t != nullptr && getKind (*t) != Kind::audio; }

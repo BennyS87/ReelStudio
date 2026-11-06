@@ -1,4 +1,5 @@
 #include "Panels.h"
+#include "EngineWidgets.h"
 #include "EffectEditors.h"
 
 namespace Reel
@@ -31,7 +32,7 @@ int RebuildingPanel::requiredHeight (int width)
     for (int i = 0; i < items.size(); ++i)
     {
         auto* c = items[i];
-        if (auto* b = dynamic_cast<Box*> (c)) c->setSize (c->getWidth(), b->heightFor (c->getWidth()));
+        if (auto* b = dynamic_cast<Box*> (c)) { c->setSize (c->getWidth(), b->heightFor (c->getWidth())); b->resized(); }
         if ((breaks.count (i) || x + c->getWidth() > width - 10) && x > 12) { x = 12; y += lineH + 10; lineH = 0; }
         x += c->getWidth() + 10; lineH = juce::jmax (lineH, c->getHeight());
     }
@@ -44,7 +45,7 @@ void RebuildingPanel::layout()
     for (int i = 0; i < items.size(); ++i)
     {
         auto* c = items[i];
-        if (auto* b = dynamic_cast<Box*> (c)) c->setSize (c->getWidth(), b->heightFor (c->getWidth()));
+        if (auto* b = dynamic_cast<Box*> (c)) { c->setSize (c->getWidth(), b->heightFor (c->getWidth())); b->resized(); }
         if ((breaks.count (i) || x + c->getWidth() > getWidth() - 10) && x > 12) { x = 12; y += lineH + 10; lineH = 0; }
         c->setTopLeftPosition (x, y);
         x += c->getWidth() + 10; lineH = juce::jmax (lineH, c->getHeight());
@@ -77,6 +78,7 @@ void SoundPanel::build()
         case Kind::synth:   if (auto* s = session.getSynth (*t)) buildSynth (*t, *s); break;
         case Kind::sampler: buildSampler (*t); break;
         case Kind::drums:   buildKit (*t); break;
+        case Kind::engine:  buildEngine (*t); break;
         case Kind::audio:
         {
             auto id = t->itemID;
@@ -338,6 +340,134 @@ void SoundPanel::addInstrumentChooser (te::AudioTrack& t, bool isSampler)
         rebuildNow();
     }), 280, 30);
     if (sel == 0) box->setText (isSampler ? "Change instrument..." : "Use one of my instruments...", juce::dontSendNotification);
+}
+
+void SoundPanel::buildEngine (te::AudioTrack& t)
+{
+    auto* eng = session.getEngine (t);
+    if (eng == nullptr) return;
+    auto id = t.itemID;
+    auto* um = &session.undoManager();
+    te::Plugin::Ptr keep (eng);
+    const int type = eng->engine.get();
+    const char* about[] = {
+        "Layers: stack the four sounds. Blend brings them in one after another; Drift makes each one breathe at its own pace.",
+        "Orbits: the four sounds sit in the corners. Drag the ring to blend them, and let the orbit move through them as you play.",
+        "Threads: hold notes and three sequencer lanes play them, each with its own steps, rate and order, on its own layer. Draw each lane's velocities.",
+        "Chords: one key plays a whole chord on the blended layers. Spread opens the voicing, Strum rolls it.",
+        "Disperse: one key fans out into several voices that glide apart from the note you played.",
+        "Lattice: hold one note and it becomes a rhythmic part, retriggered in time, with octave jumps." };
+    heading ("Engine", false);
+    for (int i = 0; i < 6; ++i)
+    {
+        auto* b = add (button (EnginePlugin::engineNames()[i], [this, keep, i] { if (auto* e = dynamic_cast<EnginePlugin*> (keep.get())) { session.undoManager().beginNewTransaction(); e->engine = i; session.sendChangeMessage(); rebuildNow(); } }), 92, 30);
+        if (i == type) b->setColour (juce::TextButton::buttonColourId, Col::acc.withAlpha (0.45f));
+    }
+    lineBreak();
+    hintText (about[type], 1000, 36);
+    lineBreak();
+    auto* main = add (new Box ("Overall", "Level and how every note fades in and out."), 260, 120);
+    for (auto* p : { eng->level, eng->attack, eng->release }) main->add (new ParamKnob (p, {}, um), 72, 78);
+
+    // the engine's own controls
+    auto knobs = [&] (Box* b, std::initializer_list<te::AutomatableParameter*> ps) { for (auto* p : ps) b->add (new ParamKnob (p, {}, um), 72, 78); };
+    auto choice = [&] (Box* b, const juce::String& label, juce::CachedValue<int>& v, const juce::StringArray& names, int w, std::function<void()> after = nullptr)
+    {
+        b->add (captionLabel (label), label.length() * 7 + 8, 28);
+        b->add (makeChoiceBox (v, names, {}, um, after), w, 28);
+    };
+    const auto title = EnginePlugin::engineNames()[type];
+    switch (type)
+    {
+        case EnginePlugin::layersEngine: { auto* b = add (new Box (title, "Blend: from the first layer alone to all four."), 260, 120); knobs (b, { eng->blend, eng->drift }); break; }
+        case EnginePlugin::orbitsEngine:
+        {
+            auto* b = add (new Box (title, "The ring is where the orbit centres; the dot is where it is now."), 640, 360);
+            b->add (new XYPad (*eng, *um), 300, 300);
+            auto* side = new Box ({}, {});
+            side->add (captionLabel ("Motion"), 54, 28);
+            side->add (makeChoiceBox (eng->motion, EnginePlugin::motionNames(), {}, um), 110, 28);
+            side->breakBefore();
+            for (auto* p : { eng->speed, eng->radius, eng->drift }) side->add (new ParamKnob (p, {}, um), 72, 78);
+            b->add (side, 290, 300);
+            break;
+        }
+        case EnginePlugin::threadsEngine:
+        {
+            auto* b = add (new Box (title, "Blend adds lanes 2 and 3. Divisi gives each lane its own share of the held notes."), 520, 120);
+            knobs (b, { eng->blend, eng->shift, eng->humanize, eng->gate });
+            choice (b, "Divisi", eng->divisi, { "Off", "On" }, 70);
+            lineBreak();
+            for (int l = 0; l < EnginePlugin::numLanes; ++l)
+            {
+                const auto layerText = eng->layerLoaded (l) ? eng->layerName (l) : eng->layerName (0);
+                auto* lb = add (new Box ("Lane " + juce::String (l + 1) + ": " + layerText, {}), 900, 150);
+                choice (lb, "Steps", eng->laneSteps[l], [] { juce::StringArray s; for (int i = 1; i <= 16; ++i) s.add (juce::String (i)); return s; }(), 64);
+                choice (lb, "Rate", eng->laneRate[l], EnginePlugin::rateNames(), 116);
+                choice (lb, "Order", eng->laneOrder[l], EnginePlugin::orderNames(), 110);
+                lb->breakBefore();
+                lb->add (new LaneEditor (*eng, l, *um), 860, 70);
+            }
+            break;
+        }
+        case EnginePlugin::chordsEngine:
+        {
+            auto* b = add (new Box (title, {}), 640, 120);
+            choice (b, "Chord", eng->chordType, EnginePlugin::chordNames(), 110);
+            choice (b, "Inversion", eng->inversion, { "Root", "First", "Second", "Third" }, 90);
+            knobs (b, { eng->spread, eng->strum, eng->blend });
+            break;
+        }
+        case EnginePlugin::disperseEngine:
+        {
+            auto* b = add (new Box (title, {}), 520, 120);
+            choice (b, "Voices", eng->disperseVoices, { "2", "3", "4", "5", "6", "7", "8" }, 60);
+            knobs (b, { eng->spread, eng->glide, eng->blend, eng->drift });
+            break;
+        }
+        default:
+        {
+            auto* b = add (new Box (title, {}), 560, 120);
+            choice (b, "Rate", eng->latticeRate, EnginePlugin::rateNames(), 116);
+            knobs (b, { eng->density, eng->jumps, eng->gate, eng->blend });
+            break;
+        }
+    }
+
+    // the four sound layers
+    lineBreak();
+    heading ("Sounds", false);
+    lineBreak();
+    auto builtIns = builtInPresetNames(), mine = session.myInstrumentNames();
+    for (int i = 0; i < EnginePlugin::numLayers; ++i)
+    {
+        auto* lb = add (new Box ("Layer " + juce::String (i + 1), {}), 320, 150);
+        juce::StringArray names { "Empty" }; juce::Array<int> ids { 1 };
+        for (int k = 0; k < builtIns.size(); ++k) { names.add ("Synth: " + builtIns[k]); ids.add (100 + k); }
+        for (int k = 0; k < mine.size(); ++k) { names.add ("My instrument: " + mine[k]); ids.add (1000 + k); }
+        names.add ("Load a sound file..."); ids.add (5000);
+        auto* box = lb->add (combo (names, ids, 0, [this, id, i, builtIns, mine] (int v)
+        {
+            auto* t = te::findAudioTrackForID (*session.edit, id); if (t == nullptr) return;
+            if (v == 5000)
+            {
+                chooser = std::make_unique<juce::FileChooser> ("Choose a sound", juce::File(), session.engine.getAudioFileFormatManager().readFormatManager.getWildcardForAllFormats());
+                chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this, id, i] (const juce::FileChooser& fc)
+                {
+                    if (auto* t = te::findAudioTrackForID (*session.edit, id)) if (fc.getResult().existsAsFile()) { session.beginAction(); session.setEngineLayer (*t, i, fc.getResult().getFullPathName()); rebuildNow(); }
+                });
+                return;
+            }
+            session.beginAction();
+            session.setEngineLayer (*t, i, v == 1 ? juce::String() : v >= 1000 ? "mine:" + mine[v - 1000] : "synth:" + builtIns[v - 100]);
+            rebuildNow();
+        }), 290, 28);
+        box->setText (eng->layerLoaded (i) ? eng->layerName (i) : juce::String ("Empty"), juce::dontSendNotification);
+        lb->breakBefore();
+        for (auto* p : { eng->layerLevel[i], eng->layerPan[i], eng->layerTune[i] }) lb->add (new ParamKnob (p, {}, um), 72, 78);
+    }
+    hintText ("Each layer can be a synth sound, one of your instruments (save any recording as an instrument from its clip menu) or a sound file.", 1000, 36);
+    addArpBox (t);
 }
 
 void SoundPanel::addArpBox (te::AudioTrack& t)

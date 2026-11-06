@@ -217,7 +217,7 @@ class Box : public juce::Component
 {
 public:
     Box (juce::String t, juce::String d = {}) : title (std::move (t)), desc (std::move (d)) {}
-    template <typename T> T* add (T* c, int w, int h) { kids.add (c); c->setSize (w, h); addAndMakeVisible (c); return c; }
+    template <typename T> T* add (T* c, int w, int h) { kids.add (c); c->setSize (w, h); addAndMakeVisible (c); resized(); return c; }   // arrange now: a later setSize to the same size wouldn't
     int heightFor (int w)
     {
         int x = 12, y = top(), lineH = 0;

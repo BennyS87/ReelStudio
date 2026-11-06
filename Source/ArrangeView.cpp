@@ -173,6 +173,7 @@ void ArrangeView::paintHeader (juce::Graphics& g, const Row& r)
     juce::String sub = kindLabel (getKind (t));
     if (getKind (t) == Kind::synth) sub << ": " << t.state.getProperty (IDs::preset, "Custom").toString().replace ("user:", "");
     if (getKind (t) == Kind::sampler) sub << ": " << t.state.getProperty (IDs::sampleName, "no sound yet").toString();
+    if (auto* e = getKind (t) == Kind::engine ? session.getEngine (t) : nullptr) sub << ": " << EnginePlugin::engineNames()[e->engine.get()];
     int fx = 0; for (auto* p : session.effectChain (t)) if (p->isEnabled()) ++fx;
     if (fx) sub << ", " << fx << (fx == 1 ? " effect" : " effects");
     if (session.getLines (t) != nullptr) sub << ", Lines";
@@ -547,7 +548,7 @@ void ArrangeView::mouseDoubleClick (const juce::MouseEvent& e)
     switch (getKind (t))
     {
         case Kind::drums: if (auto* c = session.addStepClip (t, at, 4)) session.select (&t, c); break;
-        case Kind::synth: case Kind::sampler: if (auto* c = session.addMidiClip (t, at, 1)) session.select (&t, c); break;
+        case Kind::synth: case Kind::sampler: case Kind::engine: if (auto* c = session.addMidiClip (t, at, 1)) session.select (&t, c); break;
         case Kind::audio: if (onImportAudioRequest) onImportAudioRequest (&t, at); break;
     }
     if (onOpenEditor && getKind (t) != Kind::audio) onOpenEditor();
