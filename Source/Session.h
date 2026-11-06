@@ -4,6 +4,7 @@
 #include "Dsp.h"
 #include "LinesPlugin.h"
 #include "ReelSampler.h"
+#include "Arpeggiator.h"
 
 namespace Reel
 {
@@ -103,6 +104,11 @@ public:
     void setKitValue (te::AudioTrack&, const juce::Identifier& base, int voice, float value);
     void applyKit (te::AudioTrack&);
     void auditionDrum (te::AudioTrack&, int voice);
+
+    // ---- arpeggiator ----
+    ArpPlugin* getArp (te::AudioTrack&) const;
+    ArpPlugin* addArp (te::AudioTrack&);       // goes in front of the instrument (synth or sampled)
+    void removeArp (te::AudioTrack&);
 
     // ---- Lines sequencer ----
     LinesPlugin* getLines (te::AudioTrack&) const;

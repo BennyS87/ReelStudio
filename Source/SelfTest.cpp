@@ -190,8 +190,11 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
 
         auto* cp = dynamic_cast<CompressorPlugin*> (s.addEffect (*ft, CompressorPlugin::xmlTypeName));
         setP (cp->threshold, -30.0f); setP (cp->ratio, 10.0f);
-        auto comp = renderStats ("fx-comp", range);
-        check (comp.rms < dry.rms * 0.6 && cp->grDb.load() < -3.0f, "compressor turns loud parts down (gain reduction " + juce::String (cp->grDb.load(), 1) + " dB)");
+        // end the render while the tone still plays, so the meter shows the reduction rather than its recovery afterwards
+        const te::TimeRange during (te::TimePosition(), te::TimePosition::fromSeconds (2.0));
+        cp->setEnabled (false); auto dryDuring = renderStats ("fx-dry-during", during); cp->setEnabled (true);
+        auto comp = renderStats ("fx-comp", during);
+        check (comp.rms < dryDuring.rms * 0.6 && cp->grDb.load() < -3.0f, "compressor turns loud parts down (gain reduction " + juce::String (cp->grDb.load(), 1) + " dB)");
         s.removeEffect (*cp);
 
         auto* sat = dynamic_cast<SaturationPlugin*> (s.addEffect (*ft, SaturationPlugin::xmlTypeName));
@@ -451,6 +454,53 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
         }
     }
 
+    // ---- arpeggiator ----
+    {
+        // hold C-E-G for two beats; 1/8 steps at 120 bpm are 0.25 s apart
+        auto arpRun = [&] (te::AudioTrack& t, int mode, int oct, const juce::String& file) -> std::vector<double>
+        {
+            auto* arp = s.addArp (t);
+            std::vector<double> got;
+            if (arp == nullptr) return got;
+            arp->mode = mode; arp->rate = 1; arp->octaves = oct;
+            arp->gate->setParameter (0.5f, juce::dontSendNotification);
+            for (auto* c : t.getClips()) c->removeFromParent();
+            if (auto* mc = s.addMidiClip (t, {}, 1))
+                for (int n : { 60, 64, 67 }) mc->getSequence().addNote (n, {}, te::BeatDuration::fromBeats (2.0), 100, 0, nullptr);
+            auto f = dir.getChildFile (file);
+            renderTrack (s, t, f, { te::TimePosition(), te::TimePosition::fromSeconds (1.1) });
+            const double stepSec = 0.5 * 60.0 / s.getBpm();
+            for (int i = 0; i < 4; ++i) { auto p = detectPitch (f, i * stepSec + 0.015, stepSec * 0.4); got.push_back (p ? p->freq : 0.0); }
+            return got;
+        };
+        auto matches = [] (const std::vector<double>& got, std::initializer_list<double> want)
+        {
+            int i = 0; for (double w : want) { if (i >= (int) got.size() || std::abs (got[(size_t) i] - w) > w * 0.02) return false; ++i; } return true;
+        };
+        auto show = [] (const std::vector<double>& got) { juce::StringArray a; for (double g : got) a.add (juce::String (g, 1)); return a.joinIntoString (", "); };
+
+        auto* at = s.addTrack (Kind::synth, "Arp synth");
+        s.setSynthPreset (*at, "Sub sine");
+        auto up = arpRun (*at, 0, 0, "arp-up.wav");
+        check (s.getArp (*at) != nullptr && at->pluginList.indexOf (s.getArp (*at)) < at->pluginList.indexOf (s.getSynth (*at)), "the arpeggiator sits in front of the synth");
+        check (matches (up, { 261.6, 329.6, 392.0, 261.6 }), "arpeggiator Up on a synth plays C, E, G, C (" + show (up) + " Hz)");
+        auto down = arpRun (*at, 1, 0, "arp-down.wav");
+        check (matches (down, { 392.0, 329.6, 261.6, 392.0 }), "Down plays G, E, C, G (" + show (down) + " Hz)");
+        auto twoOct = arpRun (*at, 0, 1, "arp-oct.wav");
+        check (matches (twoOct, { 261.6, 329.6, 392.0, 523.3 }), "two octaves climbs on to the next C (" + show (twoOct) + " Hz)");
+        s.deleteTrack (*at);
+
+        if (auto* it = s.addInstrumentTrack ("Selftest tone"))
+        {
+            auto sam2 = arpRun (*it, 0, 0, "arp-sampler.wav");
+            check (matches (sam2, { 261.6, 329.6, 392.0, 261.6 }), "the arpeggiator plays an instrument made from a recording (" + show (sam2) + " Hz)");
+            s.applySynthSound (*it, "Soft keys");
+            check (s.getArp (*it) != nullptr && it->pluginList.indexOf (s.getArp (*it)) < it->pluginList.indexOf (s.getSynth (*it)),
+                   "switching the instrument keeps the arpeggiator in front of it");
+            s.deleteTrack (*it);
+        }
+    }
+
     // ---- recordings into Lines ----
     {
         auto* at = s.addTrack (Kind::audio, "Sung line");
@@ -563,6 +613,12 @@ int runLiveTest (te::Engine& engine, const juce::File& dir)
     auto& adm = engine.getDeviceManager().deviceManager;
     if (adm.getCurrentDeviceTypeObject() == nullptr || adm.getCurrentDeviceTypeObject()->getTypeName() != "JACK") adm.setCurrentAudioDeviceType ("JACK", true);
     auto setup = adm.getAudioDeviceSetup();
+    if (auto* type = adm.getCurrentDeviceTypeObject())   // don't rely on whatever device was saved last time
+    {
+        type->scanForDevices();
+        if (! type->getDeviceNames (false).isEmpty()) setup.outputDeviceName = type->getDeviceNames (false)[0];
+        if (! type->getDeviceNames (true).isEmpty()) setup.inputDeviceName = type->getDeviceNames (true)[0];
+    }
     setup.inputChannels.setRange (0, 2, true); setup.outputChannels.setRange (0, 2, true);
     setup.useDefaultInputChannels = setup.useDefaultOutputChannels = false;
     const auto err = adm.setAudioDeviceSetup (setup, true);
@@ -608,7 +664,8 @@ int runLiveTest (te::Engine& engine, const juce::File& dir)
     s.select (syn);
     s.seek ({});
     s.toggleRecord();
-    pump (400);
+    for (int i = 0; i < 60 && s.transport().getPosition().inSeconds() < 0.05; ++i) pump (50);   // wait until recording is really running
+    pump (150);
     for (int i = 0; i < 4; ++i) { s.keyboardNote (60 + i * 2, 0.8f, true); pump (250); s.keyboardNote (60 + i * 2, 0.0f, false); pump (150); }
     s.toggleRecord();
     pump (1500);
@@ -623,7 +680,8 @@ int runLiveTest (te::Engine& engine, const juce::File& dir)
         s.seek ({});
         lp->recording.store (true);
         s.togglePlay();
-        pump (300);
+        for (int i = 0; i < 60 && s.transport().getPosition().inSeconds() < 0.05; ++i) pump (50);
+        pump (150);
         for (int i = 0; i < 3; ++i) { s.keyboardNote (64 + i * 3, 0.8f, true); pump (300); s.keyboardNote (64 + i * 3, 0.0f, false); pump (150); }
         lp->recording.store (false);
         pump (400);
@@ -632,6 +690,37 @@ int runLiveTest (te::Engine& engine, const juce::File& dir)
         int lines = 0; for (auto& l : lp->lineTrees()) if (LinesPlugin::lineFromTree (l).pts.size() >= 2) ++lines;
         check (lines == 3, "playing the keyboard into Lines records lines (" + juce::String (lines) + " of 3)");
     }
+    // the arpeggiator keeps its own time when the song is stopped: hold one key and watch the track's meter pulse
+    s.stop (true);
+    pump (300);
+    auto* arpT = s.addTrack (Kind::synth, "Arp live");
+    s.setSynthPreset (*arpT, "Sub sine");
+    s.select (arpT);
+    if (auto* arp = s.addArp (*arpT))
+    {
+        arp->rate = 0;   // quarter notes: 0.5 s apart at 120 bpm
+        arp->gate->setParameter (0.2f, juce::dontSendNotification);
+        pump (300);
+        if (auto* meter = arpT->pluginList.findFirstPluginOfType<te::LevelMeterPlugin>())
+        {
+            te::LevelMeasurer::Client client;
+            meter->measurer.addClient (client);
+            s.keyboardNote (60, 0.8f, true);
+            int pulses = 0; bool on = false;
+            for (int i = 0; i < 44; ++i)
+            {
+                pump (50);
+                float db = -100.0f; for (int c = 0; c < 2; ++c) db = juce::jmax (db, client.getAndClearAudioLevel (c).dB);
+                const bool now = db > -30.0f;
+                if (now && ! on) ++pulses;
+                on = now;
+            }
+            s.keyboardNote (60, 0.0f, false);
+            meter->measurer.removeClient (client);
+            check (! s.transport().isPlaying() && pulses >= 3 && pulses <= 6, "holding a key with the song stopped, the arpeggiator pulses in time (" + juce::String (pulses) + " notes in 2.2 s, want 5: one every half second)");
+        }
+    }
+
     std::cout << (fails == 0 ? "ALL LIVE TESTS PASSED" : juce::String (fails) + " LIVE TEST(S) FAILED") << std::endl;
     return fails;
 }

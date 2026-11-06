@@ -176,6 +176,7 @@ void ArrangeView::paintHeader (juce::Graphics& g, const Row& r)
     int fx = 0; for (auto* p : session.effectChain (t)) if (p->isEnabled()) ++fx;
     if (fx) sub << ", " << fx << (fx == 1 ? " effect" : " effects");
     if (session.getLines (t) != nullptr) sub << ", Lines";
+    if (auto* a = session.getArp (t); a != nullptr && a->isEnabled()) sub << ", Arp";
     g.setColour (Col::muted); g.setFont (juce::FontOptions (12.5f));
     g.drawText (sub, 14, r.y + 28, headerW - 22, 16, juce::Justification::left, true);
 

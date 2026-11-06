@@ -781,7 +781,26 @@ void Session::auditionDrum (te::AudioTrack& t, int voice)
 static bool isEffectPlugin (te::Plugin* p)
 {
     return p != nullptr && ! p->isSynth() && dynamic_cast<te::VolumeAndPanPlugin*> (p) == nullptr && dynamic_cast<te::LevelMeterPlugin*> (p) == nullptr
-        && dynamic_cast<te::SamplerPlugin*> (p) == nullptr && dynamic_cast<te::FourOscPlugin*> (p) == nullptr && dynamic_cast<LinesPlugin*> (p) == nullptr && dynamic_cast<ReelSampler*> (p) == nullptr;
+        && dynamic_cast<te::SamplerPlugin*> (p) == nullptr && dynamic_cast<te::FourOscPlugin*> (p) == nullptr && dynamic_cast<LinesPlugin*> (p) == nullptr && dynamic_cast<ReelSampler*> (p) == nullptr && dynamic_cast<ArpPlugin*> (p) == nullptr;
+}
+
+ArpPlugin* Session::getArp (te::AudioTrack& t) const { return t.pluginList.findFirstPluginOfType<ArpPlugin>(); }
+
+ArpPlugin* Session::addArp (te::AudioTrack& t)
+{
+    if (auto* a = getArp (t)) return a;
+    auto* inst = instrumentOf (t);
+    if (inst == nullptr) return nullptr;
+    auto p = edit->getPluginCache().createNewPlugin (ArpPlugin::xmlTypeName, {});
+    if (p == nullptr) return nullptr;
+    t.pluginList.insertPlugin (p, t.pluginList.indexOf (inst), nullptr);   // right in front of the instrument
+    ++structureVersion; sendChangeMessage();
+    return dynamic_cast<ArpPlugin*> (p.get());
+}
+
+void Session::removeArp (te::AudioTrack& t)
+{
+    if (auto* a = getArp (t)) { a->deleteFromParent(); ++structureVersion; sendChangeMessage(); }
 }
 
 LinesPlugin* Session::getLines (te::AudioTrack& t) const { return t.pluginList.findFirstPluginOfType<LinesPlugin>(); }

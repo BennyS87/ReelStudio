@@ -23,6 +23,7 @@ public:
         engine->getPluginManager().createBuiltInType<Reel::ReverbPlugin>();
         engine->getPluginManager().createBuiltInType<Reel::LinesPlugin>();
         engine->getPluginManager().createBuiltInType<Reel::ReelSampler>();
+        engine->getPluginManager().createBuiltInType<Reel::ArpPlugin>();
 
         auto args = juce::StringArray::fromTokens (commandLine, true);
         if (args.contains ("--migratetest"))

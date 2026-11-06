@@ -149,6 +149,7 @@ void SoundPanel::buildSynth (te::AudioTrack& t, te::FourOscPlugin& s)
     }), 150, 30);
     add (button ("Reset", [this, id, current] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) { session.beginAction(); session.setSynthPreset (*t, current); rebuildNow(); } }), 80, 30);
     addInstrumentChooser (t, false);
+    addArpBox (t);
     hintText ("Start from a sound above, then shape it: four oscillators, a filter with its own envelope, two LFOs and two modulation envelopes you can route to any setting. "
               "Play notes while you turn knobs to hear changes straight away.", 900, 40);
 
@@ -339,6 +340,41 @@ void SoundPanel::addInstrumentChooser (te::AudioTrack& t, bool isSampler)
     if (sel == 0) box->setText (isSampler ? "Change instrument..." : "Use one of my instruments...", juce::dontSendNotification);
 }
 
+void SoundPanel::addArpBox (te::AudioTrack& t)
+{
+    auto id = t.itemID;
+    auto* um = &session.undoManager();
+    auto* arp = session.getArp (t);
+    lineBreak();
+    if (arp == nullptr)
+    {
+        auto* box = add (new Box ("Arpeggiator", "Hold a chord and it plays the notes one after another, in time with the song. Works with clips, your keyboard and Lines."), 900, 76);
+        box->add (button ("Add arpeggiator", [this, id] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) { session.beginAction(); session.addArp (*t); rebuildNow(); } }), 160, 28);
+        lineBreak();
+        return;
+    }
+    te::Plugin::Ptr keep (arp);
+    auto* box = add (new Box ("Arpeggiator", "Hold a chord and it plays the notes one after another, in time with the song. Hold keeps playing after you let go."), 900, 184);
+    box->accent = arp->isEnabled() ? Col::acc : juce::Colour();
+    auto* on = box->add (new juce::ToggleButton ("On"), 56, 28);
+    on->setToggleState (arp->isEnabled(), juce::dontSendNotification);
+    on->onClick = [this, keep, on] { session.beginAction(); keep->setEnabled (on->getToggleState()); session.sendChangeMessage(); rebuildNow(); };
+    auto choice = [&] (const juce::String& label, juce::CachedValue<int>& v, const juce::StringArray& names, int w)
+    {
+        box->add (captionLabel (label), label.length() * 7 + 8, 28);
+        box->add (makeChoiceBox (v, names, {}, um), w, 28);
+    };
+    choice ("Pattern", arp->mode, ArpPlugin::modeNames(), 130);
+    choice ("Rate", arp->rate, ArpPlugin::rateNames(), 116);
+    choice ("Octaves", arp->octaves, { "1", "2", "3", "4" }, 60);
+    choice ("Velocity", arp->velMode, { "As played", "Fixed" }, 110);
+    choice ("Hold", arp->hold, { "Off", "On" }, 66);
+    box->breakBefore();
+    for (auto* p : { arp->gate, arp->swing, arp->level }) box->add (new ParamKnob (p, {}, um), 72, 78);
+    box->add (button ("Remove", [this, id] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) { session.beginAction(); session.removeArp (*t); rebuildNow(); } }), 80, 28);
+    lineBreak();
+}
+
 void SoundPanel::buildSampler (te::AudioTrack& t)
 {
     auto id = t.itemID;
@@ -380,6 +416,7 @@ void SoundPanel::buildSampler (te::AudioTrack& t)
             rebuildNow();
         }
     }), 120, 30);
+    addArpBox (t);
     te::Plugin::Ptr keep (s);
     auto* play = add (new Box ("Playing", "The original note is the key that plays the sound at its own pitch; every other key shifts it, and Lines can glide it."), 640, 120);
     play->add (new ValueKnob ("Original note", 12, 108, 1, 60, [keep] { auto* p = dynamic_cast<ReelSampler*> (keep.get()); return p ? (double) p->root.get() : 60.0; },

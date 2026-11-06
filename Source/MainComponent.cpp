@@ -402,6 +402,8 @@ void MainComponent::showHelp()
         "Record: select an audio track and press Record (or R) to record your microphone, or select a synth, sampler or drum track to record your MIDI keyboard. "
         "Choose the input and count-in in the Sound tab of an audio track.\n\n"
         "Audio to MIDI: right-click an audio clip, choose Turn into MIDI notes, then Melody, Chords or Drums.\n\n"
+        "Arpeggiator: on a synth or sampler track, open the Sound tab and press Add arpeggiator. Hold a chord and it plays the notes in turn, "
+        "in time with the song (or on its own clock when stopped). Choose the pattern, rate, octaves, gate, swing, velocity and hold.\n\n"
         "Instruments: right-click an audio clip and choose Save this sound as an instrument, or press Save as instrument on a sampler track. "
         "Use it on any synth or sampler track from the instrument list in the Sound tab, or from Add track, My instrument.\n\n"
         "Lines on recordings: select an audio track and open the Lines tab to turn the recording into lines, or to play lines with its sound.\n\n"
