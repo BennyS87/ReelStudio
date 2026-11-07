@@ -1,5 +1,6 @@
 #include "Panels.h"
 #include "EngineWidgets.h"
+#include "SamplerView.h"
 #include "EffectEditors.h"
 
 namespace Reel
@@ -546,25 +547,118 @@ void SoundPanel::buildSampler (te::AudioTrack& t)
             rebuildNow();
         }
     }), 120, 30);
-    addArpBox (t);
     te::Plugin::Ptr keep (s);
-    auto* play = add (new Box ("Playing", "The original note is the key that plays the sound at its own pitch; every other key shifts it, and Lines can glide it."), 640, 120);
-    play->add (new ValueKnob ("Original note", 12, 108, 1, 60, [keep] { auto* p = dynamic_cast<ReelSampler*> (keep.get()); return p ? (double) p->root.get() : 60.0; },
-                              [this, id] (double v) { if (auto* t = te::findAudioTrackForID (*session.edit, id)) session.setSamplerRoot (*t, (int) v); },
-                              [] (double v) { return noteName ((int) v); }), 80, 78);
-    for (auto* p : { s->fine, s->level, s->pan }) play->add (new ParamKnob (p, {}, um), 68, 78);
-    play->add (captionLabel ("Play"), 34, 28);
-    play->add (makeChoiceBox (s->oneShot, { "While held", "Whole sound" }, {}, um), 120, 28);
-    auto* env = add (new Box ("Envelope", "How each note fades in, settles and fades out."), 330, 120);
-    for (auto* p : { s->attack, s->decay, s->sustain, s->release }) env->add (new ParamKnob (p, {}, um), 68, 78);
-    auto* tone = add (new Box ("Tone and expression", "Pressure and slide come from Lines or an MPE keyboard."), 260, 120);
-    for (auto* p : { s->cutoff, s->pressureAmt, s->slideAmt }) tone->add (new ParamKnob (p, {}, um), 72, 78);
-    auto* lp = add (new Box ("Start and loop", "Skip the start of the sound, or loop part of it so long notes keep going."), 420, 120);
-    lp->add (new ParamKnob (s->startAt, {}, um), 64, 78);
-    lp->add (captionLabel ("Loop"), 36, 28);
-    lp->add (makeChoiceBox (s->loopMode, { "Off", "On" }, {}, um), 76, 28);
-    for (auto* p : { s->loopStart, s->loopEnd }) lp->add (new ParamKnob (p, {}, um), 64, 78);
-    hintText ("Play it on your MIDI keyboard, the keys at the bottom, or A to K on your computer. Add Lines in the Lines tab to draw glides with this sound.");
+    // mode
+    lineBreak();
+    const int mode = s->oneShot.get();
+    for (int m = 0; m < 3; ++m)
+    {
+        auto* b = add (button (ReelSampler::modeNames()[m], [this, id, keep, m]
+        {
+            auto* sp = dynamic_cast<ReelSampler*> (keep.get()); auto* t = te::findAudioTrackForID (*session.edit, id);
+            if (sp == nullptr || t == nullptr) return;
+            session.beginAction();
+            sp->oneShot = m;
+            if (m == ReelSampler::slice && sp->getSlices().size() <= 1) session.sliceSampler (*t);
+            rebuildNow();
+        }), 96, 30);
+        if (m == mode) b->setColour (juce::TextButton::buttonColourId, Col::acc.withAlpha (0.45f));
+    }
+    hintText (mode == ReelSampler::slice ? "Slice: each slice plays on its own key from C4 up, at its own pitch. Drag the markers, double-click to add one, right-click to remove one, click a slice or pad to hear it."
+            : mode == ReelSampler::oneShotMode ? "One Shot: each key plays the whole sound, pitched to that key, even if you let go."
+                                               : "Classic: the sound plays across the keyboard while you hold the key. Drag the white line to move the start; turn on Loop to keep long notes going.", 1000, 30);
+    lineBreak();
+    auto* view = add (new SampleView (*s, session, selectedSlice), 1000, 150);
+    if (mode == ReelSampler::slice)
+    {
+        lineBreak();
+        auto* sb = add (new Box ("Slicing", juce::String ((int) s->getSlices().size()) + " slices, on C4 to " + noteName (ReelSampler::firstSliceNote + (int) s->getSlices().size() - 1) + "."), 540, 120);
+        for (int m = 0; m < 3; ++m)
+        {
+            auto* b = sb->add (button (ReelSampler::methodNames()[m], [this, id, keep, m]
+            {
+                auto* sp = dynamic_cast<ReelSampler*> (keep.get()); auto* t = te::findAudioTrackForID (*session.edit, id);
+                if (sp == nullptr || t == nullptr) return;
+                session.beginAction(); sp->sliceMethod = m; if (m != 2) session.sliceSampler (*t); rebuildNow();
+            }), 86, 28);
+            if (m == s->sliceMethod.get()) b->setColour (juce::TextButton::buttonColourId, Col::acc.withAlpha (0.45f));
+        }
+        if (s->sliceMethod.get() == 0) sb->add (new ParamKnob (s->sensitivity, {}, um), 76, 78);
+        if (s->sliceMethod.get() == 1) { sb->add (captionLabel ("Slices"), 46, 28); sb->add (makeChoiceBox (s->sliceCount, { "4", "8", "16", "32" }, {}, um), 64, 28); }
+        if (s->sliceMethod.get() != 2)
+            sb->add (button ("Find slices", [this, id] { if (auto* t = te::findAudioTrackForID (*session.edit, id)) { session.beginAction(); session.sliceSampler (*t); rebuildNow(); } }), 100, 28);
+        auto* mk = add (new Box ("Play the slices", "A MIDI clip that plays every slice in its original place, ready to rearrange."), 420, 120);
+        mk->add (button ("Make a MIDI clip of the slices", [this, id]
+        {
+            if (auto* t = te::findAudioTrackForID (*session.edit, id)) { session.beginAction(); if (auto* c = session.slicesToMidi (*t)) session.select (t, c); }
+        }), 240, 30)->setColour (juce::TextButton::buttonColourId, Col::acc.withAlpha (0.35f));
+        lineBreak();
+        const int n = (int) s->getSlices().size();
+        auto* pads = add (new SlicePads (*s, session, selectedSlice), 1000, SlicePads::heightFor (n, 1000));
+        pads->onSelect = [view] { view->repaint(); };
+        view->onSelect = [pads] { pads->repaint(); };
+    }
+    // tabs
+    lineBreak();
+    const char* tabNames[] = { "Sample", "Pitch", "Filter", "Amp", "Mod" };
+    for (int i = 0; i < 5; ++i)
+    {
+        auto* b = add (button (tabNames[i], [this, i] { samplerTab = i; rebuildNow(); }), 86, 30);
+        if (i == samplerTab) b->setColour (juce::TextButton::buttonColourId, Col::acc.withAlpha (0.45f));
+    }
+    lineBreak();
+    auto knobsInto = [&] (Box* b, std::initializer_list<te::AutomatableParameter*> ps) { for (auto* p : ps) b->add (new ParamKnob (p, {}, um), 72, 78); };
+    auto choiceInto = [&] (Box* b, const juce::String& label, juce::CachedValue<int>& v, const juce::StringArray& names, int w)
+    { b->add (captionLabel (label), label.length() * 7 + 8, 28); b->add (makeChoiceBox (v, names, {}, um, [this] { rebuildNow(); }), w, 28); };
+    switch (samplerTab)
+    {
+        case 0:
+        {
+            auto* b = add (new Box ("Sample", mode == ReelSampler::slice ? "Applies to every slice." : "Start skips the beginning of the sound; Loop keeps long notes going."), 900, 120);
+            knobsInto (b, { s->level, s->transpose, s->pan, s->fadeIn, s->fadeOut });
+            choiceInto (b, "Reverse", s->reverse, { "Off", "On" }, 70);
+            if (mode == ReelSampler::classic)
+            {
+                b->breakBefore();
+                knobsInto (b, { s->startAt });
+                choiceInto (b, "Loop", s->loopMode, { "Off", "On" }, 70);
+                if (s->loopMode.get() == 1) knobsInto (b, { s->loopStart, s->loopEnd });
+            }
+            else if (mode == ReelSampler::oneShotMode) knobsInto (b, { s->startAt });
+            break;
+        }
+        case 1:
+        {
+            auto* b = add (new Box ("Pitch", mode == ReelSampler::slice ? "Slices keep their own pitch: Pitch and Fine tune move them all." : "The original note is the key that plays the sound at its own pitch."), 640, 120);
+            if (mode != ReelSampler::slice)
+                b->add (new ValueKnob ("Original note", 12, 108, 1, 60, [keep] { auto* p = dynamic_cast<ReelSampler*> (keep.get()); return p ? (double) p->root.get() : 60.0; },
+                                       [this, id] (double v) { if (auto* t = te::findAudioTrackForID (*session.edit, id)) session.setSamplerRoot (*t, (int) v); },
+                                       [] (double v) { return noteName ((int) v); }), 80, 78);
+            knobsInto (b, { s->transpose, s->fine });
+            break;
+        }
+        case 2:
+        {
+            auto* b = add (new Box ("Filter", "Low pass darkens, high pass thins, band pass keeps a slice of the middle. Slide from Lines moves the cutoff."), 640, 120);
+            choiceInto (b, "Type", s->filterType, ReelSampler::filterNames(), 110);
+            knobsInto (b, { s->cutoff, s->resonance });
+            break;
+        }
+        case 3:
+        {
+            auto* b = add (new Box ("Amp", "How each note fades in, settles and fades out."), 640, 120);
+            knobsInto (b, { s->attack, s->decay, s->sustain, s->release });
+            break;
+        }
+        default:
+        {
+            auto* b = add (new Box ("Mod", "A slow wobble on pitch, filter, volume or pan, plus how pressure and slide from Lines or an MPE keyboard change the sound."), 760, 120);
+            choiceInto (b, "LFO to", s->lfoTarget, ReelSampler::lfoNames(), 90);
+            knobsInto (b, { s->lfoRate, s->lfoDepth, s->pressureAmt, s->slideAmt });
+            break;
+        }
+    }
+    addArpBox (t);
 }
 
 void SoundPanel::buildKit (te::AudioTrack& t)

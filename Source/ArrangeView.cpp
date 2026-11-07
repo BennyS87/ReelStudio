@@ -162,7 +162,7 @@ void ArrangeView::paintHeader (juce::Graphics& g, const Row& r)
         g.setColour (Col::text); g.setFont (juce::FontOptions (13.0f, juce::Font::bold));
         juce::String label = "Volume";
         for (auto& a : session.automationTargets (t)) if (a.param == p) label = a.label;
-        g.drawText (label + "  \xe2\x96\xbe", 14, r.y + 8, headerW - 22, 18, juce::Justification::left);   // ▾
+        g.drawText (label + juce::String::fromUTF8 ("  \xe2\x96\xbe"), 14, r.y + 8, headerW - 22, 18, juce::Justification::left);   // ▾
         g.setColour (Col::muted); g.setFont (juce::FontOptions (12.0f));
         g.drawText (p != nullptr && p->hasAutomationPoints() ? "Drag points, right-click removes" : "Click in the lane to add points", 14, r.y + 30, headerW - 22, 16, juce::Justification::left);
         return;
@@ -610,6 +610,7 @@ void ArrangeView::showClipMenu (te::Clip& c)
         m.addItem (4, w->getIsReversed() ? "Play forwards again" : "Reverse");
         m.addItem (5, "Make a playable instrument from this sound");
         m.addItem (11, "Save this sound as an instrument...");
+        m.addItem (13, "Slice this recording into pads");
         juce::PopupMenu tm;
         tm.addItem (8, "Melody (one note at a time: voice, bass, lead)");
         tm.addItem (9, "Chords (several notes at once)");
@@ -649,6 +650,7 @@ void ArrangeView::showClipMenu (te::Clip& c)
                 }
                 break;
             case 12: if (w) session.convertToLines (*w); break;
+            case 13: if (w) { session.beginAction(); session.sliceClip (*w); } break;
             case 8: case 9: case 10:
                 if (w) session.convertToMidi (*w, r == 8 ? TranscribeMode::melody : r == 9 ? TranscribeMode::chords : TranscribeMode::drums);
                 break;

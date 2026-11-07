@@ -71,3 +71,75 @@ private:
     te::AutomatableParameter::Ptr A, D, S, R; juce::Colour colour;
 };
 }
+
+#include "TranceGate.h"
+namespace Reel
+{
+/** The gate's steps as a ring: click a segment to switch it on or off, drag up or down on it for its level. */
+class GateRing : public juce::Component, private juce::Timer
+{
+public:
+    GateRing (TranceGatePlugin& g, juce::UndoManager& u) : gate (&g), um (u) { startTimerHz (30); }
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (6);
+        const auto c = r.getCentre(); const float outer = juce::jmin (r.getWidth(), r.getHeight()) / 2, inner = outer * 0.5f;
+        const int n = gate->numSteps(), now = gate->currentStep.load();
+        for (int i = 0; i < n; ++i)
+        {
+            const float a0 = juce::MathConstants<float>::twoPi * i / n - juce::MathConstants<float>::halfPi + 0.04f;
+            const float a1 = juce::MathConstants<float>::twoPi * (i + 1) / n - juce::MathConstants<float>::halfPi - 0.04f;
+            const float lv = gate->stepLevel (i), rOut = inner + (outer - inner) * (0.35f + 0.65f * juce::jmax (lv, 0.0f));
+            juce::Path seg; seg.addCentredArc (c.x, c.y, outer, outer, 0, a0 + juce::MathConstants<float>::halfPi, a1 + juce::MathConstants<float>::halfPi, true);
+            seg.lineTo (c.x + inner * std::cos (a1), c.y + inner * std::sin (a1));
+            seg.addCentredArc (c.x, c.y, inner, inner, 0, a1 + juce::MathConstants<float>::halfPi, a0 + juce::MathConstants<float>::halfPi, false);
+            seg.closeSubPath();
+            g.setColour (Col::lane2); g.fillPath (seg);
+            if (lv > 0)
+            {
+                juce::Path on; on.addCentredArc (c.x, c.y, rOut, rOut, 0, a0 + juce::MathConstants<float>::halfPi, a1 + juce::MathConstants<float>::halfPi, true);
+                on.lineTo (c.x + inner * std::cos (a1), c.y + inner * std::sin (a1));
+                on.addCentredArc (c.x, c.y, inner, inner, 0, a1 + juce::MathConstants<float>::halfPi, a0 + juce::MathConstants<float>::halfPi, false);
+                on.closeSubPath();
+                g.setColour (i == now ? Col::text : Col::acc.withAlpha (0.45f + 0.55f * lv)); g.fillPath (on);
+            }
+            else if (i == now) { g.setColour (Col::muted); g.strokePath (seg, juce::PathStrokeType (1.5f)); }
+        }
+        g.setColour (Col::panel2); g.fillEllipse (juce::Rectangle<float> (inner * 1.7f, inner * 1.7f).withCentre (c));
+        g.setColour (Col::text); g.setFont (juce::FontOptions (22.0f, juce::Font::bold));
+        g.drawText (juce::String (n), juce::Rectangle<float> (inner * 1.6f, 26).withCentre (c.translated (0, -8)), juce::Justification::centred);
+        g.setColour (Col::acc); g.setFont (juce::FontOptions (12.0f));
+        g.drawText (TranceGatePlugin::rateNames()[gate->rate.get()], juce::Rectangle<float> (inner * 1.6f, 16).withCentre (c.translated (0, 14)), juce::Justification::centred);
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        dragStep = stepAt (e.position);
+        if (dragStep < 0) return;
+        um.beginNewTransaction();
+        startLevel = gate->stepLevel (dragStep) > 0 ? 0.0f : 1.0f;   // a click switches the step
+        gate->setStep (dragStep, startLevel, &um);
+        repaint();
+    }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (dragStep < 0 || e.getDistanceFromDragStart() < 4) return;
+        gate->setStep (dragStep, juce::jlimit (0.0f, 1.0f, (startLevel > 0 ? 1.0f : gate->stepLevel (dragStep)) - e.getDistanceFromDragStartY() / 80.0f), &um);
+        repaint();
+    }
+private:
+    int stepAt (juce::Point<float> p) const
+    {
+        auto r = getLocalBounds().toFloat().reduced (6);
+        const auto d = p - r.getCentre(); const float outer = juce::jmin (r.getWidth(), r.getHeight()) / 2;
+        const float dist = d.getDistanceFromOrigin();
+        if (dist < outer * 0.5f || dist > outer) return -1;
+        float a = std::atan2 (d.y, d.x) + juce::MathConstants<float>::halfPi;
+        if (a < 0) a += juce::MathConstants<float>::twoPi;
+        return juce::jlimit (0, gate->numSteps() - 1, (int) (a / juce::MathConstants<float>::twoPi * gate->numSteps()));
+    }
+    void timerCallback() override { repaint(); }
+    juce::ReferenceCountedObjectPtr<TranceGatePlugin> gate;
+    juce::UndoManager& um;
+    int dragStep = -1; float startLevel = 0;
+};
+}

@@ -6,6 +6,7 @@
 #include "ReelSampler.h"
 #include "Arpeggiator.h"
 #include "Engines.h"
+#include "TranceGate.h"
 
 namespace Reel
 {
@@ -84,6 +85,11 @@ public:
     te::FourOscPlugin* getSynth (te::AudioTrack&) const;
     te::SamplerPlugin* getSampler (te::AudioTrack&) const;       // the drum kit's sampler
     ReelSampler* getSampled (te::AudioTrack&) const;               // a sampler track's instrument
+
+    // ---- slicing ----
+    int sliceSampler (te::AudioTrack&);                    // finds slices by the sampler's chosen method
+    te::MidiClip* slicesToMidi (te::AudioTrack&);           // a clip that plays every slice in its original place
+    te::AudioTrack* sliceClip (te::WaveAudioClip&);         // a Slice sampler from a recording, with that clip
 
     // ---- my instruments (saved sampled sounds) ----
     juce::File instrumentsDir();

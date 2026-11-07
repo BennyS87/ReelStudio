@@ -500,3 +500,46 @@ std::vector<TranscribedNote> transcribe (const juce::File& f, TranscribeMode mod
     }
 }
 }
+
+namespace Reel
+{
+std::vector<double> findTransients (const juce::AudioBuffer<float>& b, double sr, float sens)
+{
+    std::vector<double> out { 0.0 };
+    constexpr int order = 10, N = 1 << order, hop = 256;
+    const int len = b.getNumSamples();
+    if (len < N * 2) return out;
+    std::vector<float> x ((size_t) len);
+    for (int c = 0; c < b.getNumChannels(); ++c) for (int i = 0; i < len; ++i) x[(size_t) i] += b.getSample (c, i) / (float) b.getNumChannels();
+    juce::dsp::FFT fft (order);
+    std::vector<float> buf ((size_t) N * 2), prev ((size_t) N / 2 + 1, 0.0f);
+    const int frames = (len - N) / hop;
+    std::vector<float> flux ((size_t) frames);
+    for (int fr = 0; fr < frames; ++fr)
+    {
+        std::fill (buf.begin(), buf.end(), 0.0f);
+        for (int j = 0; j < N; ++j) buf[(size_t) j] = x[(size_t) (fr * hop + j)] * (0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * j / (N - 1)));
+        fft.performFrequencyOnlyForwardTransform (buf.data());
+        float f = 0;
+        for (int k = 1; k <= N / 2; ++k) { f += juce::jmax (0.0f, buf[(size_t) k] - prev[(size_t) k]); prev[(size_t) k] = buf[(size_t) k]; }
+        flux[(size_t) fr] = f;
+    }
+    float maxFlux = 1e-9f; for (auto f : flux) maxFlux = juce::jmax (maxFlux, f);
+    const float floorLevel = maxFlux * (0.32f - 0.30f * juce::jlimit (0.0f, 1.0f, sens));
+    const int minGap = juce::jmax (2, (int) (0.05 * sr / hop));
+    int last = -minGap;
+    for (int i = 1; i + 1 < frames; ++i)
+    {
+        float mean = 0; int n = 0;
+        for (int k = juce::jmax (0, i - 16); k <= juce::jmin (frames - 1, i + 16); ++k) { mean += flux[(size_t) k]; ++n; }
+        mean /= (float) n;
+        if (flux[(size_t) i] < flux[(size_t) (i - 1)] || flux[(size_t) i] < flux[(size_t) (i + 1)]) continue;
+        if (flux[(size_t) i] < mean * 1.4f || flux[(size_t) i] < floorLevel || i - last < minGap) continue;
+        last = i;
+        // step back to where the hit starts: the frame's window begins a quarter-window before the flux peak
+        const double t = juce::jmax (0.0, (i * hop + N * 0.25 - hop) / sr);
+        if (t - out.back() > 0.03) out.push_back (t);
+    }
+    return out;
+}
+}

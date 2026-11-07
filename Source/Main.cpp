@@ -25,6 +25,7 @@ public:
         engine->getPluginManager().createBuiltInType<Reel::ReelSampler>();
         engine->getPluginManager().createBuiltInType<Reel::ArpPlugin>();
         engine->getPluginManager().createBuiltInType<Reel::EnginePlugin>();
+        engine->getPluginManager().createBuiltInType<Reel::TranceGatePlugin>();
 
         auto args = juce::StringArray::fromTokens (commandLine, true);
         if (args.contains ("--migratetest"))

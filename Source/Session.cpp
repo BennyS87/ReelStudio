@@ -111,6 +111,7 @@ const juce::Array<EffectInfo>& effectSlots()
         a.add (EffectInfo { EchoPlugin::xmlTypeName,       "Echo",       "Tempo-synced or free repeats, ping-pong, wobble, dirt and ducking.", 6 });
         a.add (EffectInfo { ReverbPlugin::xmlTypeName,     "Reverb",     "Rooms to huge halls, with pre-delay, movement, ducking and freeze.", 7 });
         a.add (EffectInfo { VocoderPlugin::xmlTypeName,    "Vocoder",    "Makes the track speak through a synth. Best on vocals or speech.", 8 });
+        a.add (EffectInfo { TranceGatePlugin::xmlTypeName, "Trance Gate", "Chops the sound into a rhythm in time with the song: click the ring to set the steps.", 9 });
         return a;
     }();
     return slots;
@@ -553,6 +554,51 @@ void Session::migrateSamplers()
         old->deleteFromParent();
         t->pluginList.insertPlugin (p, juce::jmax (0, idx), nullptr);
     }
+}
+
+int Session::sliceSampler (te::AudioTrack& t)
+{
+    auto* s = getSampled (t);
+    if (s == nullptr || ! s->hasSound()) return 0;
+    const int n = s->autoSlice (&undoManager());
+    ++structureVersion; sendChangeMessage();
+    return n;
+}
+
+te::MidiClip* Session::slicesToMidi (te::AudioTrack& t)
+{
+    auto* s = getSampled (t);
+    if (s == nullptr || ! s->hasSound()) return nullptr;
+    const auto sl = s->getSlices();
+    const double secs = s->soundSeconds();
+    const auto start = snapToBar (transport().getPosition());
+    auto mc = t.insertMIDIClip ({ start, start + te::TimeDuration::fromSeconds (secs) }, nullptr);
+    if (mc == nullptr) return nullptr;
+    mc->setName ("Slices");
+    const double b0 = toBeats (start).inBeats();
+    for (int i = 0; i < (int) sl.size(); ++i)
+    {
+        const double t0 = sl[(size_t) i] * secs, t1 = (i + 1 < (int) sl.size() ? sl[(size_t) i + 1] : 1.0) * secs;
+        const double sb = toBeats (start + te::TimeDuration::fromSeconds (t0)).inBeats() - b0, eb = toBeats (start + te::TimeDuration::fromSeconds (t1)).inBeats() - b0;
+        mc->getSequence().addNote (ReelSampler::firstSliceNote + i, te::BeatPosition::fromBeats (sb), te::BeatDuration::fromBeats (juce::jmax (1.0 / 64.0, eb - sb)), 100, 0, &undoManager());
+    }
+    if (onMessage) onMessage ("Made a clip of " + juce::String ((int) sl.size()) + " slices. Move its notes to rearrange the slices.");
+    return mc.get();
+}
+
+te::AudioTrack* Session::sliceClip (te::WaveAudioClip& c)
+{
+    const auto at = c.getPosition().getStart();
+    auto* t = makeSamplerFromClip (c);
+    auto* s = t != nullptr ? getSampled (*t) : nullptr;
+    if (s == nullptr) return t;
+    s->oneShot = ReelSampler::slice;
+    s->sliceMethod = 0;
+    const int n = sliceSampler (*t);
+    transport().setPosition (at);
+    if (auto* mc = slicesToMidi (*t)) select (t, mc);
+    if (onMessage) onMessage ("Sliced into " + juce::String (n) + " pads on C4 up. The new clip plays them back in order; mute the original to hear only the slices.");
+    return t;
 }
 
 juce::File Session::instrumentsDir() { auto d = appDataDir().getChildFile ("Instruments"); d.createDirectory(); return d; }

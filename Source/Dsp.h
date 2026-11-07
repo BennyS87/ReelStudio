@@ -33,3 +33,9 @@ namespace Reel
     struct ContourLine { std::vector<ContourPoint> points; int velocity = 100; };
     std::vector<ContourLine> transcribeContour (const juce::File&, float sensitivity = 0.5f);
 }
+
+namespace Reel
+{
+    /** Where the hits are in a sound, in seconds (always starts with 0). sensitivity 0..1: higher finds softer hits. */
+    std::vector<double> findTransients (const juce::AudioBuffer<float>&, double sampleRate, float sensitivity);
+}

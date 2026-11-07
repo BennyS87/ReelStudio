@@ -277,6 +277,16 @@ int buildEffectEditor (Box& box, Session& s, te::Plugin& p)
         display->onBandSelected = [controls] (int b) { controls->setBand (b); };
         return 744;
     }
+    if (auto* tg = dynamic_cast<TranceGatePlugin*> (&p))
+    {
+        box.breakBefore();
+        box.add (new GateRing (*tg, um), 220, 220);
+        box.add (new EnvelopeDisplay (tg->attack, tg->decay, tg->sustain, tg->release, Col::acc), 300, 110);
+        box.breakBefore();
+        addGenericChoices (box, *tg, um);
+        addKnobs (box, p, um, { tg->attack, tg->decay, tg->sustain, tg->release, tg->swing, tg->mix });
+        return 640;
+    }
     if (auto* c = dynamic_cast<CompressorPlugin*> (&p))
     {
         box.breakBefore();

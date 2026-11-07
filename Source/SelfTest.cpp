@@ -613,6 +613,102 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
         }
     }
 
+    // ---- sampler: slicing, filter; trance gate ----
+    {
+        auto bandEnergy = [] (const juce::File& f, double lo, double hi, double from, double len)   // share of energy between lo and hi Hz
+        {
+            juce::AudioFormatManager fm; fm.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (f));
+            if (r == nullptr) return 0.0;
+            constexpr int order = 12, N = 1 << order;
+            juce::AudioBuffer<float> b (1, N); b.clear();
+            r->read (&b, 0, juce::jmin (N, (int) (len * r->sampleRate)), (juce::int64) (from * r->sampleRate), true, false);
+            std::vector<float> d ((size_t) N * 2); for (int i = 0; i < N; ++i) d[(size_t) i] = b.getSample (0, i);
+            juce::dsp::FFT fft (order); fft.performFrequencyOnlyForwardTransform (d.data());
+            double in = 0, all = 1e-12;
+            for (int k = 1; k < N / 2; ++k) { const double hz = k * r->sampleRate / N, e = (double) d[(size_t) k] * d[(size_t) k]; all += e; if (hz >= lo && hz < hi) in += e; }
+            return in / all;
+        };
+        const auto loop = dir.getChildFile ("beat.wav");
+        auto* st = s.addTrack (Kind::sampler, "Slicer");
+        const bool loaded = s.loadSamplerSound (*st, loop, false);
+        auto* smp = s.getSampled (*st);
+        if (loaded && smp != nullptr)
+        {
+            smp->oneShot = ReelSampler::slice; smp->sliceMethod = 0;
+            const int n = s.sliceSampler (*st);
+            const auto sl = smp->getSlices();
+            const double secs = smp->soundSeconds(), spb = 60.0 / s.getBpm();
+            int lined = 0; double worst = 0;
+            for (int bar = 0; bar < 2; ++bar) for (int stp : { 0, 2, 4, 6, 8, 10, 12, 14 })
+            {
+                const double hit = (bar * 16 + stp) * 0.25 * spb;
+                for (double x : sl) if (std::abs (x * secs - hit) < 0.02) { ++lined; worst = juce::jmax (worst, std::abs (x * secs - hit)); break; }
+            }
+            check (n == 16 && lined == 16, "slicing a drum loop by its hits finds " + juce::String (n) + " slices, " + juce::String (lined) + " of 16 on the hits (within " + juce::String (juce::roundToInt (worst * 1000)) + " ms)");
+
+            auto playNote = [&] (int note, const juce::String& name)
+            {
+                for (auto* c : st->getClips()) c->removeFromParent();
+                if (auto* mc = s.addMidiClip (*st, {}, 1)) mc->getSequence().addNote (note, {}, te::BeatDuration::fromBeats (0.2), 110, 0, nullptr);
+                auto f = dir.getChildFile (name + ".wav");
+                renderTrack (s, *st, f, { te::TimePosition(), te::TimePosition::fromSeconds (0.25) });
+                return f;
+            };
+            auto kick = playNote (60, "slice-kick"), hat = playNote (61, "slice-hat");
+            const double kLow = bandEnergy (kick, 20, 200, 0.0, 0.09), hHigh = bandEnergy (hat, 5000, 20000, 0.0, 0.09);
+            check (kLow > 0.5 && hHigh > 0.4, "each key plays its own slice: C4 is the kick (" + juce::String (juce::roundToInt (kLow * 100)) + "% low end), C#4 the hi-hat (" + juce::String (juce::roundToInt (hHigh * 100)) + "% highs)");
+
+            smp->filterType = 1; smp->cutoff->setParameter (400.0f, juce::dontSendNotification);
+            auto dark = playNote (61, "slice-hat-filtered");
+            const double hDark = bandEnergy (dark, 5000, 20000, 0.0, 0.09);
+            check (hDark < hHigh * 0.1, "the low-pass filter darkens the hi-hat (highs " + juce::String (juce::roundToInt (hHigh * 100)) + "% to " + juce::String (hDark * 100, 1) + "%)");
+            smp->cutoff->setParameter (20000.0f, juce::dontSendNotification);
+
+            for (auto* c : st->getClips()) c->removeFromParent();
+            s.transport().setPosition ({});
+            auto* mc = s.slicesToMidi (*st);
+            auto back = dir.getChildFile ("slices-back.wav");
+            renderTrack (s, *st, back, { te::TimePosition(), te::TimePosition::fromSeconds (secs) });
+            auto hits = transcribe (back, TranscribeMode::drums);
+            check (mc != nullptr && mc->getSequence().getNotes().size() == n && (int) hits.size() >= 14,
+                   "Make a MIDI clip of the slices plays the loop back: " + juce::String ((int) hits.size()) + " hits heard");
+
+            smp->sliceMethod = 1; smp->sliceCount = 1;
+            check (s.sliceSampler (*st) == 8, "slicing by the beat gives 8 equal slices");
+        }
+        else check (false, "load the drum loop into a sampler");
+        s.deleteTrack (*st);
+
+        // trance gate on a steady tone: open steps loud, closed steps quiet
+        auto* gt = s.addTrack (Kind::synth, "Gate test");
+        s.setSynthPreset (*gt, "Organ");
+        if (auto* mc = s.addMidiClip (*gt, {}, 2)) mc->getSequence().addNote (60, {}, te::BeatDuration::fromBeats (8), 100, 0, nullptr);
+        auto* gp = dynamic_cast<TranceGatePlugin*> (s.addEffect (*gt, TranceGatePlugin::xmlTypeName));
+        if (gp != nullptr)
+        {
+            for (int i = 0; i < 16; ++i) gp->setStep (i, i % 2 == 0 ? 1.0f : 0.0f, nullptr);
+            auto gf = dir.getChildFile ("gate.wav");
+            renderTrack (s, *gt, gf, { te::TimePosition(), te::TimePosition::fromSeconds (2.0) });
+            juce::AudioFormatManager fm; fm.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (gf));
+            double on = 0, off = 0;
+            if (r != nullptr)
+            {
+                const double stepSec = 0.25 * 60.0 / s.getBpm();
+                for (int k = 2; k < 14; ++k)
+                {
+                    juce::AudioBuffer<float> b (1, (int) (stepSec * 0.5 * r->sampleRate));
+                    r->read (&b, 0, b.getNumSamples(), (juce::int64) ((k + 0.25) * stepSec * r->sampleRate), true, false);
+                    (k % 2 == 0 ? on : off) += b.getRMSLevel (0, 0, b.getNumSamples());
+                }
+            }
+            check (on > off * 6, "Trance Gate opens on its steps and closes between them (" + juce::String (juce::Decibels::gainToDecibels (on / juce::jmax (1e-9, off)), 1) + " dB louder on the open steps)");
+        }
+        else check (false, "add a Trance Gate");
+        s.deleteTrack (*gt);
+    }
+
     // ---- recordings into Lines ----
     {
         auto* at = s.addTrack (Kind::audio, "Sung line");
@@ -732,6 +828,20 @@ int runSelfTest (te::Engine& engine, const juce::File& dir)
                 uiSession->select (et); pump();
             }
             std::cout << "      engine screens showing" << std::endl;
+        }
+        if (auto* tone = uiSession->tracks().getFirst())
+        {
+            if (auto* sp = uiSession->addTrack (Kind::sampler, "Slicer"))
+            {
+                uiSession->loadSamplerSound (*sp, dir.getChildFile ("beat.wav"), false);
+                if (auto* rs = uiSession->getSampled (*sp)) { rs->oneShot = ReelSampler::slice; uiSession->sliceSampler (*sp); }
+                uiSession->select (sp); pump();
+                uiSession->addEffect (*sp, TranceGatePlugin::xmlTypeName);
+                ui->getDock().showPanel ("Effects"); pump();
+                ui->getDock().showPanel ("Sound"); pump();
+                std::cout << "      slicer and trance gate showing" << std::endl;
+            }
+            juce::ignoreUnused (tone);
         }
         uiSession->select (uiSession->tracks().getFirst()); pump();
         std::cout << "      opening a saved project" << std::endl;

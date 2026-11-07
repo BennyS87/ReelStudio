@@ -46,6 +46,8 @@ private:
     void addInstrumentChooser (te::AudioTrack&, bool isSampler);
     void addArpBox (te::AudioTrack&);
     void buildEngine (te::AudioTrack&);
+    int samplerTab = 0;
+    std::shared_ptr<int> selectedSlice = std::make_shared<int> (0);
     void buildKit (te::AudioTrack&);
     std::unique_ptr<juce::FileChooser> chooser;
 };
